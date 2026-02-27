@@ -121,6 +121,9 @@ export class TerminalSessionManager {
       fontSize: 13,
       lineHeight: 1.2,
       letterSpacing: 0,
+      cursorBlink: true,
+      cursorStyle: 'block',
+      cursorInactiveStyle: 'none',
       allowProposedApi: true,
       scrollOnUserInput: false,
     });
@@ -194,13 +197,26 @@ export class TerminalSessionManager {
     // handler crashes with "r is not defined" when TUI apps (e.g. Amp) send
     // mode-query escape sequences (CSI Ps $ p / CSI ? Ps $ p).
     // Register custom handlers that intercept these sequences before the
-    // buggy built-in handler runs, and send back a proper DECRPM response
-    // reporting each queried mode as "not recognized" (Pm=0).
+    // buggy built-in handler runs, and send back a proper DECRPM response.
     // Response format: CSI [?] Ps ; Pm $ y
+    // Pm values: 0=not recognized, 1=set, 2=reset, 3=permanently set, 4=permanently reset
     try {
       const parser = (this.terminal as any).parser;
       if (parser?.registerCsiHandler) {
         const ptyId = this.id;
+
+        // DEC private mode default states for accurate DECRQM responses.
+        // Returning accurate state (instead of blanket "not recognized") lets
+        // TUI apps like Claude Code properly manage cursor visibility, scroll
+        // regions, and other modes — preventing state corruption.
+        const decModeDefaults: Record<number, number> = {
+          1: 2, // DECCKM: reset (normal cursor keys)
+          7: 1, // DECAWM: set (auto wraparound on)
+          25: 1, // DECTCEM: set (cursor visible)
+          1049: 2, // Alt screen buffer: reset (main screen)
+          2004: 2, // Bracketed paste: reset (off)
+        };
+
         // ANSI mode request: CSI Ps $ p  →  respond CSI Ps ; 0 $ y
         const ansiDisp = parser.registerCsiHandler(
           { intermediates: '$', final: 'p' },
@@ -210,12 +226,13 @@ export class TerminalSessionManager {
             return true;
           }
         );
-        // DEC private mode request: CSI ? Ps $ p  →  respond CSI ? Ps ; 0 $ y
+        // DEC private mode request: CSI ? Ps $ p  →  respond CSI ? Ps ; Pm $ y
         const decDisp = parser.registerCsiHandler(
           { prefix: '?', intermediates: '$', final: 'p' },
           (params: (number | number[])[]) => {
             const mode = (params[0] as number) ?? 0;
-            window.electronAPI.ptyInput({ id: ptyId, data: `\x1b[?${mode};0$y` });
+            const pm = decModeDefaults[mode] ?? 0;
+            window.electronAPI.ptyInput({ id: ptyId, data: `\x1b[?${mode};${pm}$y` });
             return true;
           }
         );
@@ -1016,6 +1033,12 @@ export class TerminalSessionManager {
       this.metrics.recordExit(info);
       this.ptyStarted = false;
       this.clearQueuedResize();
+      // Reset terminal mode state left behind by TUI apps (scroll regions,
+      // origin mode, cursor modes, etc.) so the next shell/CLI starts clean.
+      // DECSTR (\x1b[!p) performs a soft terminal reset, then clear screen.
+      try {
+        this.terminal.write('\x1b[!p\x1b[H\x1b[2J');
+      } catch {}
       this.emitExit(info);
     });
 
