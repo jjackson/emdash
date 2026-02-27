@@ -1,11 +1,9 @@
 import { BrowserWindow, ipcMain } from 'electron';
 import { log } from '../lib/logger';
-import { exec, execFile } from 'child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { promisify } from 'util';
 import {
   getStatus as gitGetStatus,
   getFileDiff as gitGetFileDiff,
@@ -19,9 +17,7 @@ import { databaseService } from '../services/DatabaseService';
 import { injectIssueFooter } from '../lib/prIssueFooter';
 import { getCreatePrBodyPlan } from '../lib/prCreateBodyPlan';
 import { patchCurrentPrBodyWithIssueFooter } from '../lib/prIssueFooterPatch';
-
-const execAsync = promisify(exec);
-const execFileAsync = promisify(execFile);
+import { wslExec as execAsync, wslExecFile as execFileAsync } from '../utils/wslPath';
 
 const GIT_STATUS_DEBOUNCE_MS = 500;
 const supportsRecursiveWatch = process.platform === 'darwin' || process.platform === 'win32';

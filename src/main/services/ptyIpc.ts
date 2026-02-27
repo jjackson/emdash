@@ -32,6 +32,7 @@ import { execFile } from 'child_process';
 import { randomUUID } from 'crypto';
 import path from 'path';
 import { quoteShellArg } from '../utils/shellEscape';
+import { isWslPath, toWslPosixPath } from '../utils/wslPath';
 
 const owners = new Map<string, WebContents>();
 const listeners = new Set<string>();
@@ -417,13 +418,21 @@ export function registerPtyIpc(): void {
 
               if (isClaudeOrSimilar) {
                 // Claude stores sessions in ~/.claude/projects/ with various naming schemes
+                // When running inside WSL, Claude sees the POSIX path, not the UNC path.
+                const effectiveCwd =
+                  process.platform === 'win32' && isWslPath(cwd) ? toWslPosixPath(cwd) : cwd;
+
                 // Check both hash-based and path-based directory names
-                const cwdHash = crypto.createHash('sha256').update(cwd).digest('hex').slice(0, 16);
+                const cwdHash = crypto
+                  .createHash('sha256')
+                  .update(effectiveCwd)
+                  .digest('hex')
+                  .slice(0, 16);
                 const claudeHashDir = path.join(os.homedir(), '.claude', 'projects', cwdHash);
 
                 // Also check for path-based directory name (Claude's actual format)
                 // Replace path separators with hyphens for the directory name
-                const pathBasedName = cwd.replace(/\//g, '-');
+                const pathBasedName = effectiveCwd.replace(/[/\\]/g, '-');
                 const claudePathDir = path.join(os.homedir(), '.claude', 'projects', pathBasedName);
 
                 // Check if any Claude session directory exists for this working directory
@@ -443,7 +452,9 @@ export function registerPtyIpc(): void {
                   try {
                     const dirs = fs.readdirSync(projectsDir);
                     // Check if any directory contains part of the working directory path
-                    const cwdParts = cwd.split('/').filter((p) => p.length > 0);
+                    const cwdParts = effectiveCwd
+                      .split(/[/\\]/)
+                      .filter((p: string) => p.length > 0);
                     const lastParts = cwdParts.slice(-3).join('-'); // Use last 3 parts of path
                     sessionExists = dirs.some((dir: string) => dir.includes(lastParts));
                   } catch {

@@ -9,6 +9,7 @@ import { parsePtyId } from '@shared/ptyId';
 import { providerStatusCache } from './providerStatusCache';
 import { errorTracking } from '../errorTracking';
 import { getProviderCustomConfig } from '../settings';
+import { isWslPath, getWslPtyConfig, toWslPosixPath } from '../utils/wslPath';
 
 /**
  * Environment variables to pass through for agent authentication.
@@ -174,6 +175,31 @@ function markSessionCreated(ptyId: string, uuid: string, cwd: string): void {
   }
 }
 
+function removeSessionEntry(ptyId: string): void {
+  const map = loadSessionMap();
+  delete map[ptyId];
+  try {
+    fs.writeFileSync(sessionMapPath(), JSON.stringify(map));
+  } catch (e) {
+    log.warn('ptyManager: failed to persist session map after removal', e);
+  }
+}
+
+/**
+ * Check whether a Claude session file actually exists on disk.
+ * Claude stores conversations as <uuid>.jsonl inside ~/.claude/projects/<encoded-cwd>/.
+ */
+function sessionFileExists(uuid: string, cwd: string): boolean {
+  try {
+    const effectiveCwd = process.platform === 'win32' && isWslPath(cwd) ? toWslPosixPath(cwd) : cwd;
+    const encoded = effectiveCwd.replace(/[:\\/]/g, '-');
+    const sessionFile = path.join(os.homedir(), '.claude', 'projects', encoded, `${uuid}.jsonl`);
+    return fs.existsSync(sessionFile);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Discover the existing Claude session ID for a working directory by scanning
  * Claude Code's local project storage (~/.claude/projects/<encoded-path>/).
@@ -186,8 +212,10 @@ function markSessionCreated(ptyId: string, uuid: string, cwd: string): void {
  */
 function discoverExistingClaudeSession(cwd: string, excludeUuids: Set<string>): string | null {
   try {
+    // Claude inside WSL encodes POSIX paths, not UNC paths.
+    const effectiveCwd = process.platform === 'win32' && isWslPath(cwd) ? toWslPosixPath(cwd) : cwd;
     // Claude encodes project paths by replacing path separators; on Windows also strip ':'.
-    const encoded = cwd.replace(/[:\\/]/g, '-');
+    const encoded = effectiveCwd.replace(/[:\\/]/g, '-');
     const projectDir = path.join(os.homedir(), '.claude', 'projects', encoded);
 
     if (!fs.existsSync(projectDir)) return null;
@@ -258,8 +286,15 @@ function applySessionIsolation(
 
   const knownSession = getKnownSessionId(id);
   if (knownSession) {
-    cliArgs.push('--resume', knownSession);
-    return true;
+    // Verify the session actually exists on disk before resuming.
+    // The session map entry may be stale if a prior spawn failed before
+    // the agent created any state (e.g. binary not found, PTY crash).
+    if (sessionFileExists(knownSession, cwd)) {
+      cliArgs.push('--resume', knownSession);
+      return true;
+    }
+    // Stale entry — remove it and fall through to create a fresh session.
+    removeSessionEntry(id);
   }
 
   if (isAdditionalChat) {
@@ -706,6 +741,12 @@ export function startDirectPty(options: {
     resume,
   } = options;
 
+  // WSL paths cannot use direct spawn — resolved CLI paths are Windows binaries,
+  // not Linux ELFs. Fall back to startPty() which handles WSL transparently.
+  if (process.platform === 'win32' && isWslPath(cwd)) {
+    return null;
+  }
+
   const resolvedConfig = resolveProviderCommandConfig(providerId);
   const provider = resolvedConfig?.provider;
 
@@ -852,6 +893,190 @@ function getDefaultShell(): string {
   return process.env.SHELL || '/bin/bash';
 }
 
+/**
+ * Compute the spawn configuration for a PTY, handling WSL paths.
+ * Exported for testing — this is the pure arg-building logic without
+ * the node-pty native module dependency.
+ */
+export function computePtySpawnConfig(options: {
+  id: string;
+  shell?: string;
+  cwd?: string;
+  autoApprove?: boolean;
+  initialPrompt?: string;
+  skipResume?: boolean;
+  shellSetup?: string;
+}): {
+  command: string;
+  args: string[];
+  cwd: string;
+  shell: string;
+  env: Record<string, string>;
+} {
+  const { id, shell, cwd, autoApprove, initialPrompt, skipResume, shellSetup } = options;
+
+  const defaultShell = getDefaultShell();
+  let useShell = shell || defaultShell;
+  const useCwd = cwd || process.cwd() || os.homedir();
+
+  const wslConfig =
+    process.platform === 'win32' && isWslPath(useCwd) ? getWslPtyConfig(useCwd) : null;
+
+  // On Windows, resolve shell command to full path for node-pty.
+  // Skip for WSL paths — CLI resolution happens inside the WSL distro.
+  if (
+    process.platform === 'win32' &&
+    !wslConfig &&
+    shell &&
+    !shell.includes('\\') &&
+    !shell.includes('/')
+  ) {
+    try {
+      const { execSync } = require('child_process');
+      let resolved = '';
+      try {
+        resolved = execSync(`where ${shell}.cmd`, { encoding: 'utf8' })
+          .trim()
+          .split('\n')[0]
+          .replace(/\r/g, '')
+          .trim();
+      } catch {
+        resolved = execSync(`where ${shell}`, { encoding: 'utf8' })
+          .trim()
+          .split('\n')[0]
+          .replace(/\r/g, '')
+          .trim();
+      }
+      if (resolved && !resolved.match(/\.(exe|cmd|bat)$/i)) {
+        try {
+          if (fs.existsSync(resolved + '.cmd')) resolved = resolved + '.cmd';
+        } catch {}
+      }
+      if (resolved) useShell = resolved;
+    } catch {}
+  }
+
+  const useEnv: Record<string, string> = {
+    TERM: 'xterm-256color',
+    COLORTERM: 'truecolor',
+    TERM_PROGRAM: 'emdash',
+    HOME: process.env.HOME || os.homedir(),
+    USER: process.env.USER || os.userInfo().username,
+    SHELL: process.env.SHELL || defaultShell,
+  };
+
+  const args: string[] = [];
+  if (process.platform !== 'win32' || wslConfig) {
+    try {
+      const base = String(useShell).split(/[/\\]/).pop() || '';
+      const baseLower = base.toLowerCase().replace(/\.(exe|cmd|bat)$/i, '');
+      const provider = PROVIDERS.find((p) => p.cli === baseLower);
+
+      if (provider) {
+        const resolvedConfig = resolveProviderCommandConfig(provider.id);
+        let resolvedCli = resolvedConfig?.cli || provider.cli || baseLower;
+        if (wslConfig) {
+          resolvedCli =
+            resolvedCli
+              .split(/[/\\]/)
+              .pop()
+              ?.replace(/\.(exe|cmd|bat)$/i, '') || resolvedCli;
+        }
+
+        const cliArgs: string[] = [];
+        const usedSessionIsolation = applySessionIsolation(
+          cliArgs,
+          provider,
+          id,
+          useCwd,
+          !skipResume
+        );
+
+        cliArgs.push(
+          ...buildProviderCliArgs({
+            resume: !usedSessionIsolation && !skipResume,
+            resumeFlag: resolvedConfig?.resumeFlag,
+            defaultArgs: resolvedConfig?.defaultArgs,
+            extraArgs: resolvedConfig?.extraArgs,
+            autoApprove,
+            autoApproveFlag: resolvedConfig?.autoApproveFlag,
+            initialPrompt,
+            initialPromptFlag: resolvedConfig?.initialPromptFlag,
+            useKeystrokeInjection: provider.useKeystrokeInjection,
+          })
+        );
+
+        if (resolvedConfig?.env) {
+          for (const [k, v] of Object.entries(resolvedConfig.env)) {
+            if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && typeof v === 'string') {
+              useEnv[k] = v;
+            }
+          }
+        }
+
+        const cliCommand = resolvedCli;
+        const commandString =
+          cliArgs.length > 0
+            ? `${cliCommand} ${cliArgs
+                .map((arg) =>
+                  /[\s'"\\$`\n\r\t]/.test(arg) ? `'${arg.replace(/'/g, "'\\''")}'` : arg
+                )
+                .join(' ')}`
+            : cliCommand;
+
+        const chainShell = wslConfig ? 'bash' : defaultShell;
+        const resumeShell = `'${chainShell.replace(/'/g, "'\\''")}' -il`;
+        const chainCommand = shellSetup
+          ? `${shellSetup} && ${commandString}; exec ${resumeShell}`
+          : `${commandString}; exec ${resumeShell}`;
+
+        useShell = chainShell;
+        const shellBase = chainShell.split('/').pop() || '';
+        if (shellBase === 'zsh') args.push('-lic', chainCommand);
+        else if (shellBase === 'bash') args.push('-lic', chainCommand);
+        else if (shellBase === 'fish') args.push('-ic', chainCommand);
+        else if (shellBase === 'sh') args.push('-lc', chainCommand);
+        else args.push('-c', chainCommand);
+      } else {
+        if (shellSetup) {
+          const cFlag = base === 'fish' ? '-ic' : base === 'sh' ? '-lc' : '-lic';
+          const resumeShell = `'${(wslConfig ? 'bash' : useShell).replace(/'/g, "'\\''")}' -il`;
+          args.push(cFlag, `${shellSetup}; exec ${resumeShell}`);
+        } else {
+          args.push(
+            base === 'zsh' || base === 'bash' || base === 'fish' || base === 'sh' ? '-il' : '-i'
+          );
+        }
+      }
+    } catch {}
+
+    if (wslConfig) {
+      useShell = 'bash';
+    }
+  }
+
+  let spawnCommand: string;
+  let spawnArgs: string[];
+  let spawnCwd: string;
+
+  if (wslConfig) {
+    if (args.length > 0) {
+      spawnCommand = 'wsl.exe';
+      spawnArgs = [...wslConfig.args, '--', useShell, ...args];
+    } else {
+      spawnCommand = 'wsl.exe';
+      spawnArgs = [...wslConfig.args];
+    }
+    spawnCwd = wslConfig.cwd;
+  } else {
+    spawnCommand = useShell;
+    spawnArgs = args;
+    spawnCwd = useCwd;
+  }
+
+  return { command: spawnCommand, args: spawnArgs, cwd: spawnCwd, shell: useShell, env: useEnv };
+}
+
 export async function startPty(options: {
   id: string;
   cwd?: string;
@@ -884,6 +1109,10 @@ export async function startPty(options: {
   let useShell = shell || defaultShell;
   const useCwd = cwd || process.cwd() || os.homedir();
 
+  // Detect WSL UNC paths — route shell + agent commands through wsl.exe.
+  const wslConfig =
+    process.platform === 'win32' && isWslPath(useCwd) ? getWslPtyConfig(useCwd) : null;
+
   // Build a clean environment instead of inheriting process.env wholesale.
   //
   // WHY: When Emdash runs as an AppImage on Linux (or other packaged Electron apps),
@@ -911,8 +1140,15 @@ export async function startPty(options: {
     ...(process.env.SSH_AUTH_SOCK && { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK }),
     ...(env || {}),
   };
-  // On Windows, resolve shell command to full path for node-pty
-  if (process.platform === 'win32' && shell && !shell.includes('\\') && !shell.includes('/')) {
+  // On Windows, resolve shell command to full path for node-pty.
+  // Skip for WSL paths — CLI resolution happens inside the WSL distro.
+  if (
+    process.platform === 'win32' &&
+    !wslConfig &&
+    shell &&
+    !shell.includes('\\') &&
+    !shell.includes('/')
+  ) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const { execSync } = require('child_process');
@@ -970,15 +1206,25 @@ export async function startPty(options: {
   // For provider CLIs, spawn the user's shell and run the provider command via -c,
   // then exec back into the shell to allow users to stay in a normal prompt after exiting the agent.
   const args: string[] = [];
-  if (process.platform !== 'win32') {
+  if (process.platform !== 'win32' || wslConfig) {
     try {
-      const base = String(useShell).split('/').pop() || '';
-      const baseLower = base.toLowerCase();
+      // Extract the basename from the shell (handles both / and \ path separators)
+      // and strip Windows executable extensions for provider matching.
+      const base = String(useShell).split(/[/\\]/).pop() || '';
+      const baseLower = base.toLowerCase().replace(/\.(exe|cmd|bat)$/i, '');
       const provider = PROVIDERS.find((p) => p.cli === baseLower);
 
       if (provider) {
         const resolvedConfig = resolveProviderCommandConfig(provider.id);
-        const resolvedCli = resolvedConfig?.cli || provider.cli || baseLower;
+        let resolvedCli = resolvedConfig?.cli || provider.cli || baseLower;
+        if (wslConfig) {
+          // Inside WSL, use the bare command name — Windows paths don't exist.
+          resolvedCli =
+            resolvedCli
+              .split(/[/\\]/)
+              .pop()
+              ?.replace(/\.(exe|cmd|bat)$/i, '') || resolvedCli;
+        }
 
         // Build the provider command with flags
         const cliArgs: string[] = [];
@@ -1025,14 +1271,16 @@ export async function startPty(options: {
             : cliCommand;
 
         // After the provider exits, exec back into the user's shell (login+interactive)
-        const resumeShell = `'${defaultShell.replace(/'/g, "'\\''")}' -il`;
+        // Under WSL, the chain shell is always bash.
+        const chainShell = wslConfig ? 'bash' : defaultShell;
+        const resumeShell = `'${chainShell.replace(/'/g, "'\\''")}' -il`;
         const chainCommand = shellSetup
           ? `${shellSetup} && ${commandString}; exec ${resumeShell}`
           : `${commandString}; exec ${resumeShell}`;
 
         // Always use the default shell for the -c command to avoid re-detecting provider CLI
-        useShell = defaultShell;
-        const shellBase = defaultShell.split('/').pop() || '';
+        useShell = chainShell;
+        const shellBase = chainShell.split('/').pop() || '';
         if (shellBase === 'zsh') args.push('-lic', chainCommand);
         else if (shellBase === 'bash') args.push('-lic', chainCommand);
         else if (shellBase === 'fish') args.push('-ic', chainCommand);
@@ -1042,7 +1290,7 @@ export async function startPty(options: {
         // For normal shells, use login + interactive to load user configs
         if (shellSetup) {
           const cFlag = base === 'fish' ? '-ic' : base === 'sh' ? '-lc' : '-lic';
-          const resumeShell = `'${useShell.replace(/'/g, "'\\''")}' -il`;
+          const resumeShell = `'${(wslConfig ? 'bash' : useShell).replace(/'/g, "'\\''")}' -il`;
           args.push(cFlag, `${shellSetup}; exec ${resumeShell}`);
         } else {
           args.push(
@@ -1051,16 +1299,43 @@ export async function startPty(options: {
         }
       }
     } catch {}
+
+    // Inside WSL, always spawn bash — never a Windows shell binary.
+    if (wslConfig) {
+      useShell = 'bash';
+    }
   }
 
   let proc: IPty;
   try {
-    const spawnSpec = resolveWindowsPtySpawn(useShell, args);
-    proc = pty.spawn(spawnSpec.command, spawnSpec.args, {
+    let spawnCommand: string;
+    let spawnArgs: string[];
+    let spawnCwd: string;
+
+    if (wslConfig) {
+      // Route through wsl.exe — skip resolveWindowsPtySpawn (which wraps with cmd.exe).
+      if (args.length > 0) {
+        // Provider chain: wsl.exe -d <distro> --cd <posixCwd> -- bash <args>
+        spawnCommand = 'wsl.exe';
+        spawnArgs = [...wslConfig.args, '--', useShell, ...args];
+      } else {
+        // Plain shell: wsl.exe -d <distro> --cd <posixCwd>
+        spawnCommand = 'wsl.exe';
+        spawnArgs = [...wslConfig.args];
+      }
+      spawnCwd = wslConfig.cwd; // safe Windows-side cwd
+    } else {
+      const spawnSpec = resolveWindowsPtySpawn(useShell, args);
+      spawnCommand = spawnSpec.command;
+      spawnArgs = spawnSpec.args;
+      spawnCwd = useCwd;
+    }
+
+    proc = pty.spawn(spawnCommand, spawnArgs, {
       name: 'xterm-256color',
       cols,
       rows,
-      cwd: useCwd,
+      cwd: spawnCwd,
       env: useEnv,
     });
   } catch (err: any) {

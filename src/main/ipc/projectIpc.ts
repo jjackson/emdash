@@ -1,12 +1,9 @@
 import { ipcMain, dialog } from 'electron';
 import { join } from 'path';
 import * as fs from 'fs';
-import { exec } from 'child_process';
-import { promisify } from 'util';
 import { getMainWindow } from '../app/window';
 import { errorTracking } from '../errorTracking';
-
-const execAsync = promisify(exec);
+import { wslExec as execAsync } from '../utils/wslPath';
 const DEFAULT_REMOTE = 'origin';
 const DEFAULT_BRANCH = 'main';
 

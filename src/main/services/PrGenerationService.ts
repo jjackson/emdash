@@ -1,10 +1,7 @@
-import { exec, execFile, spawn } from 'child_process';
-import { promisify } from 'util';
+import { spawn } from 'child_process';
 import { log } from '../lib/logger';
 import { getProvider, PROVIDER_IDS, type ProviderId } from '../../shared/providers/registry';
-
-const execAsync = promisify(exec);
-const execFileAsync = promisify(execFile);
+import { wslExec as execAsync, wslExecFile as execFileAsync } from '../utils/wslPath';
 
 export interface GeneratedPrContent {
   title: string;
