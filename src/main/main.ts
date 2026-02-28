@@ -116,6 +116,18 @@ import { errorTracking } from './errorTracking';
 import { join } from 'path';
 import { rmSync } from 'node:fs';
 
+// Catch EPIPE and other pipe errors from PTY streams so they don't crash
+// the entire main process. These occur when a PTY process is killed while
+// Node is still reading from its pipe — harmless but fatal without a handler.
+process.on('uncaughtException', (err) => {
+  if (err && 'code' in err && (err as NodeJS.ErrnoException).code === 'EPIPE') {
+    console.warn('[main] Ignoring EPIPE error (PTY pipe closed):', err.message);
+    return;
+  }
+  // Re-throw non-EPIPE errors so Electron's default dialog still shows
+  throw err;
+});
+
 // Set app name for macOS dock and menu bar
 app.setName('Emdash');
 
