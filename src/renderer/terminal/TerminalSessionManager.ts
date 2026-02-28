@@ -788,6 +788,8 @@ export class TerminalSessionManager {
    * position (prevents jumps when sidebars resize and trigger fits).
    */
   private fitPreservingViewport() {
+    if (this.disposed) return;
+
     const width = this.container.clientWidth;
     const height = this.container.clientHeight;
     if (width < MIN_RENDERABLE_TERMINAL_WIDTH_PX || height < MIN_RENDERABLE_TERMINAL_HEIGHT_PX) {
@@ -801,7 +803,31 @@ export class TerminalSessionManager {
           ? buffer.baseY - buffer.viewportY
           : null;
 
-      this.fitAddon.fit();
+      // Custom fit calculation that bypasses FitAddon's hardcoded scrollbar
+      // width subtraction (14px via DEFAULT_SCROLL_BAR_WIDTH) and parseInt()
+      // truncation. FitAddon always subtracts 14px for a scrollbar that
+      // Emdash hides via CSS, costing ~1-2 columns.
+      const core = (this.terminal as any)._core;
+      const dims = core?._renderService?.dimensions;
+      const cellWidth: number | undefined = dims?.css?.cell?.width;
+      const cellHeight: number | undefined = dims?.css?.cell?.height;
+
+      if (cellWidth && cellHeight && cellWidth > 0 && cellHeight > 0) {
+        // Use container's clientWidth/clientHeight directly.
+        // No scrollbar subtraction — scrollbars are hidden via CSS.
+        // No padding subtraction — terminal container has no padding.
+        const cols = Math.max(MIN_TERMINAL_COLS, Math.floor(width / cellWidth));
+        const rows = Math.max(MIN_TERMINAL_ROWS, Math.floor(height / cellHeight));
+
+        if (this.terminal.cols !== cols || this.terminal.rows !== rows) {
+          core._renderService.clear();
+          this.terminal.resize(cols, rows);
+        }
+      } else {
+        // Cell dimensions not yet available (first render before character
+        // measurement). Fall back to FitAddon which handles this internally.
+        this.fitAddon.fit();
+      }
 
       // Use requestAnimationFrame to ensure terminal is fully rendered before restoring scroll position
       // This prevents viewport jumps when sidebars resize

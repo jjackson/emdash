@@ -1,6 +1,8 @@
 @import '@xterm/xterm/css/xterm.css';
 
-/* Hide xterm viewport scrollbars in embedded terminals */
+/* Hide all xterm scrollbars in embedded terminals:
+   1. Native browser scrollbar on .xterm-viewport
+   2. Custom SmoothScrollableElement scrollbar (xterm 6+) */
 .xterm .xterm-viewport {
   background-color: transparent !important;
   scrollbar-width: none; /* Firefox */
@@ -9,6 +11,9 @@
 .xterm .xterm-viewport::-webkit-scrollbar {
   width: 0 !important; /* Chrome/Safari */
   height: 0 !important;
+}
+.xterm .xterm-scrollable-element > .scrollbar {
+  display: none !important;
 }
 
 @tailwind base;
