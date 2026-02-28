@@ -206,15 +206,34 @@ export class TerminalSessionManager {
         const ptyId = this.id;
 
         // DEC private mode default states for accurate DECRQM responses.
-        // Returning accurate state (instead of blanket "not recognized") lets
-        // TUI apps like Claude Code properly manage cursor visibility, scroll
-        // regions, and other modes — preventing state corruption.
+        // Covers all modes that xterm.js 6.0 supports so TUI apps get proper
+        // capability detection. Returning accurate state (instead of blanket
+        // "not recognized") lets TUI apps like Claude Code properly manage
+        // cursor visibility, scroll regions, synchronized output, and other
+        // modes — preventing state corruption and ghost cursors.
         const decModeDefaults: Record<number, number> = {
           1: 2, // DECCKM: reset (normal cursor keys)
+          6: 2, // DECOM: reset (absolute cursor addressing)
           7: 1, // DECAWM: set (auto wraparound on)
+          9: 2, // X10 mouse tracking: reset
+          12: 1, // att610 cursor blink: set (matches cursorBlink option)
           25: 1, // DECTCEM: set (cursor visible)
-          1049: 2, // Alt screen buffer: reset (main screen)
+          45: 2, // Reverse wrap-around: reset
+          47: 2, // Alt screen buffer (legacy): reset
+          66: 2, // DECNKM: reset (numeric keypad)
+          1000: 2, // Normal mouse tracking: reset
+          1002: 2, // Cell motion mouse tracking: reset
+          1003: 2, // All motion mouse tracking: reset
+          1004: 2, // Focus tracking: reset
+          1005: 2, // UTF-8 mouse mode: reset
+          1006: 2, // SGR mouse mode: reset
+          1015: 2, // URXVT mouse mode: reset
+          1016: 2, // SGR-Pixels mouse mode: reset
+          1047: 2, // Alt screen buffer (variant): reset
+          1048: 2, // Save/restore cursor (mode): reset
+          1049: 2, // Alt screen buffer + save cursor: reset (main screen)
           2004: 2, // Bracketed paste: reset (off)
+          2026: 2, // Synchronized output: reset (off, but supported)
         };
 
         // Track runtime DEC mode state so DECRQM responses stay accurate
@@ -249,6 +268,19 @@ export class TerminalSessionManager {
           }
         );
 
+        // Track DECSTR (CSI ! p) — reset all tracked modes to defaults.
+        // When xterm.js processes a soft reset it restores default mode state;
+        // keep our shadow map in sync so subsequent DECRQM responses are accurate.
+        const decStrDisp = parser.registerCsiHandler(
+          { intermediates: '!', final: 'p' },
+          () => {
+            for (const [k, v] of Object.entries(decModeDefaults)) {
+              decModeState.set(Number(k), v);
+            }
+            return false; // let xterm.js also process the reset
+          }
+        );
+
         // ANSI mode request: CSI Ps $ p  →  respond CSI Ps ; 0 $ y
         const ansiDisp = parser.registerCsiHandler(
           { intermediates: '$', final: 'p' },
@@ -272,7 +304,8 @@ export class TerminalSessionManager {
           () => ansiDisp.dispose(),
           () => decDisp.dispose(),
           () => decSetDisp.dispose(),
-          () => decResetDisp.dispose()
+          () => decResetDisp.dispose(),
+          () => decStrDisp.dispose()
         );
       }
     } catch (err) {
