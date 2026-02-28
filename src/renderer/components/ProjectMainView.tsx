@@ -970,6 +970,37 @@ const ProjectMainView: React.FC<ProjectMainViewProps> = ({
         </div>
       </div>
 
+      {/* Project info footer */}
+      <div className="flex shrink-0 items-center gap-4 border-t border-border/50 px-6 py-2 text-xs text-muted-foreground/70">
+        <button
+          type="button"
+          className="flex min-w-0 items-center gap-1.5 truncate transition-colors hover:text-muted-foreground"
+          onClick={() => window.electronAPI.openExternal(`file://${project.path}`)}
+          title={project.path}
+        >
+          <Folder className="size-3 shrink-0" />
+          <span className="truncate">{project.path}</span>
+        </button>
+        {project.githubInfo?.connected && project.githubInfo.repository ? (
+          <>
+            <span className="text-border">|</span>
+            <button
+              type="button"
+              className="flex min-w-0 items-center gap-1.5 truncate transition-colors hover:text-muted-foreground"
+              onClick={() =>
+                window.electronAPI.openExternal(
+                  `https://github.com/${project.githubInfo?.repository}`
+                )
+              }
+              title={`github.com/${project.githubInfo.repository}`}
+            >
+              <Github className="size-3 shrink-0" />
+              <span className="truncate">{project.githubInfo.repository}</span>
+            </button>
+          </>
+        ) : null}
+      </div>
+
       <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
         <AlertDialogContent>
           <AlertDialogHeader>
