@@ -217,6 +217,38 @@ export class TerminalSessionManager {
           2004: 2, // Bracketed paste: reset (off)
         };
 
+        // Track runtime DEC mode state so DECRQM responses stay accurate
+        // after TUI apps toggle modes via CSI ? h / CSI ? l.
+        const decModeState = new Map<number, number>(
+          Object.entries(decModeDefaults).map(([k, v]) => [Number(k), v])
+        );
+
+        // Track CSI ? h (set) — update tracked modes to "set" (1)
+        const decSetDisp = parser.registerCsiHandler(
+          { prefix: '?', final: 'h' },
+          (params: (number | number[])[]) => {
+            for (const p of params) {
+              if (typeof p === 'number' && decModeState.has(p)) {
+                decModeState.set(p, 1);
+              }
+            }
+            return false; // let xterm.js also process the sequence
+          }
+        );
+
+        // Track CSI ? l (reset) — update tracked modes to "reset" (2)
+        const decResetDisp = parser.registerCsiHandler(
+          { prefix: '?', final: 'l' },
+          (params: (number | number[])[]) => {
+            for (const p of params) {
+              if (typeof p === 'number' && decModeState.has(p)) {
+                decModeState.set(p, 2);
+              }
+            }
+            return false; // let xterm.js also process the sequence
+          }
+        );
+
         // ANSI mode request: CSI Ps $ p  →  respond CSI Ps ; 0 $ y
         const ansiDisp = parser.registerCsiHandler(
           { intermediates: '$', final: 'p' },
@@ -231,14 +263,16 @@ export class TerminalSessionManager {
           { prefix: '?', intermediates: '$', final: 'p' },
           (params: (number | number[])[]) => {
             const mode = (params[0] as number) ?? 0;
-            const pm = decModeDefaults[mode] ?? 0;
+            const pm = decModeState.get(mode) ?? 0;
             window.electronAPI.ptyInput({ id: ptyId, data: `\x1b[?${mode};${pm}$y` });
             return true;
           }
         );
         this.disposables.push(
           () => ansiDisp.dispose(),
-          () => decDisp.dispose()
+          () => decDisp.dispose(),
+          () => decSetDisp.dispose(),
+          () => decResetDisp.dispose()
         );
       }
     } catch (err) {
