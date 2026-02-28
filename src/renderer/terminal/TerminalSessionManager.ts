@@ -15,6 +15,7 @@ import {
   shouldMapShiftEnterToCtrlJ,
   shouldPasteToTerminal,
 } from './terminalKeybindings';
+import { setupDECModeTracking } from './terminalModeTracker';
 
 const SNAPSHOT_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 const MAX_DATA_WINDOW_BYTES = 128 * 1024 * 1024; // 128 MB soft guardrail
@@ -193,88 +194,13 @@ export class TerminalSessionManager {
     this.terminal.loadAddon(this.serializeAddon);
     this.terminal.loadAddon(this.webLinksAddon);
 
-    // Work around xterm.js 6.0.0 bug: the built-in DECRQM (Request Mode)
-    // handler crashes with "r is not defined" when TUI apps (e.g. Amp) send
-    // mode-query escape sequences (CSI Ps $ p / CSI ? Ps $ p).
-    // Register custom handlers that intercept these sequences before the
-    // buggy built-in handler runs, and send back a proper DECRPM response.
-    // Response format: CSI [?] Ps ; Pm $ y
-    // Pm values: 0=not recognized, 1=set, 2=reset, 3=permanently set, 4=permanently reset
+    // Work around xterm.js 6.0.0 DECRQM bug — see terminalModeTracker.ts
     try {
       const parser = (this.terminal as any).parser;
-      if (parser?.registerCsiHandler) {
-        const ptyId = this.id;
-
-        // DEC private mode default states for accurate DECRQM responses.
-        // Returning accurate state (instead of blanket "not recognized") lets
-        // TUI apps like Claude Code properly manage cursor visibility, scroll
-        // regions, and other modes — preventing state corruption.
-        const decModeDefaults: Record<number, number> = {
-          1: 2, // DECCKM: reset (normal cursor keys)
-          7: 1, // DECAWM: set (auto wraparound on)
-          25: 1, // DECTCEM: set (cursor visible)
-          1049: 2, // Alt screen buffer: reset (main screen)
-          2004: 2, // Bracketed paste: reset (off)
-        };
-
-        // Track runtime DEC mode state so DECRQM responses stay accurate
-        // after TUI apps toggle modes via CSI ? h / CSI ? l.
-        const decModeState = new Map<number, number>(
-          Object.entries(decModeDefaults).map(([k, v]) => [Number(k), v])
-        );
-
-        // Track CSI ? h (set) — update tracked modes to "set" (1)
-        const decSetDisp = parser.registerCsiHandler(
-          { prefix: '?', final: 'h' },
-          (params: (number | number[])[]) => {
-            for (const p of params) {
-              if (typeof p === 'number' && decModeState.has(p)) {
-                decModeState.set(p, 1);
-              }
-            }
-            return false; // let xterm.js also process the sequence
-          }
-        );
-
-        // Track CSI ? l (reset) — update tracked modes to "reset" (2)
-        const decResetDisp = parser.registerCsiHandler(
-          { prefix: '?', final: 'l' },
-          (params: (number | number[])[]) => {
-            for (const p of params) {
-              if (typeof p === 'number' && decModeState.has(p)) {
-                decModeState.set(p, 2);
-              }
-            }
-            return false; // let xterm.js also process the sequence
-          }
-        );
-
-        // ANSI mode request: CSI Ps $ p  →  respond CSI Ps ; 0 $ y
-        const ansiDisp = parser.registerCsiHandler(
-          { intermediates: '$', final: 'p' },
-          (params: (number | number[])[]) => {
-            const mode = (params[0] as number) ?? 0;
-            window.electronAPI.ptyInput({ id: ptyId, data: `\x1b[${mode};0$y` });
-            return true;
-          }
-        );
-        // DEC private mode request: CSI ? Ps $ p  →  respond CSI ? Ps ; Pm $ y
-        const decDisp = parser.registerCsiHandler(
-          { prefix: '?', intermediates: '$', final: 'p' },
-          (params: (number | number[])[]) => {
-            const mode = (params[0] as number) ?? 0;
-            const pm = decModeState.get(mode) ?? 0;
-            window.electronAPI.ptyInput({ id: ptyId, data: `\x1b[?${mode};${pm}$y` });
-            return true;
-          }
-        );
-        this.disposables.push(
-          () => ansiDisp.dispose(),
-          () => decDisp.dispose(),
-          () => decSetDisp.dispose(),
-          () => decResetDisp.dispose()
-        );
-      }
+      const cleanups = setupDECModeTracking(parser, this.id, (args) =>
+        window.electronAPI.ptyInput(args)
+      );
+      this.disposables.push(...cleanups);
     } catch (err) {
       log.warn('Failed to register DECRQM workaround handlers', { error: err });
     }
