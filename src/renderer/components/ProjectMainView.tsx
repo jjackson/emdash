@@ -736,7 +736,25 @@ const ProjectMainView: React.FC<ProjectMainViewProps> = ({
             {/* Header */}
             <div className="px-10">
               <header className="flex items-center justify-between">
-                <h1 className="text-2xl font-semibold tracking-tight">{project.name}</h1>
+                <div>
+                  <h1 className="text-2xl font-semibold tracking-tight">{project.name}</h1>
+                  <div className="mt-1 flex flex-col gap-0.5">
+                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <Folder className="size-3 shrink-0" />
+                      <span className="truncate">
+                        {project.isRemote && project.remotePath
+                          ? project.remotePath
+                          : project.path}
+                      </span>
+                    </div>
+                    {project.githubInfo?.connected && project.githubInfo.repository ? (
+                      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                        <Github className="size-3 shrink-0" />
+                        <span>{project.githubInfo.repository}</span>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
                 <div className="flex items-center gap-2">
                   <BaseBranchControls
                     baseBranch={baseBranch}
