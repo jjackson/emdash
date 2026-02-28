@@ -1,11 +1,9 @@
-import { spawn } from 'child_process';
 import { log } from '../lib/logger';
 import { getProvider, PROVIDER_IDS, type ProviderId } from '../../shared/providers/registry';
 import {
   wslExec as execAsync,
   wslExecFile as execFileAsync,
-  isWslPath,
-  getWslPtyConfig,
+  wslAwareSpawn,
 } from '../utils/wslPath';
 
 export interface GeneratedPrContent {
@@ -295,28 +293,15 @@ export class PrGenerationService {
       }
 
       // Spawn the provider CLI (WSL-aware)
-      const wslConfig =
-        process.platform === 'win32' && isWslPath(taskPath) ? getWslPtyConfig(taskPath) : null;
-
-      const child = wslConfig
-        ? spawn('wsl.exe', [...wslConfig.args, '--', cliCommand, ...args], {
-            cwd: wslConfig.cwd,
-            stdio: ['pipe', 'pipe', 'pipe'],
-            env: {
-              ...process.env,
-              TERM: 'xterm-256color',
-              COLORTERM: 'truecolor',
-            },
-          })
-        : spawn(cliCommand, args, {
-            cwd: taskPath,
-            stdio: ['pipe', 'pipe', 'pipe'],
-            env: {
-              ...process.env,
-              TERM: 'xterm-256color',
-              COLORTERM: 'truecolor',
-            },
-          });
+      const child = wslAwareSpawn(cliCommand, args, {
+        cwd: taskPath,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          TERM: 'xterm-256color',
+          COLORTERM: 'truecolor',
+        },
+      });
 
       // Set timeout
       const timeoutId = setTimeout(() => {
