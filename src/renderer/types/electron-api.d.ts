@@ -1,5 +1,7 @@
 // Updated for Codex integration
 
+import type { AgentEvent } from '../../shared/agentEvents';
+
 type ProjectSettingsPayload = {
   projectId: string;
   name: string;
@@ -73,7 +75,12 @@ declare global {
           repository: { branchPrefix: string; pushOnCreate: boolean };
           projectPrep?: { autoInstallOnOpenInEditor: boolean };
           browserPreview?: { enabled: boolean; engine: 'chromium' };
-          notifications?: { enabled: boolean; sound: boolean };
+          notifications?: {
+            enabled: boolean;
+            sound: boolean;
+            osNotifications: boolean;
+            soundFocusMode: 'always' | 'unfocused';
+          };
           mcp?: {
             context7?: {
               enabled: boolean;
@@ -84,6 +91,7 @@ declare global {
           tasks?: {
             autoGenerateName: boolean;
             autoApproveByDefault: boolean;
+            autoTrustWorktrees: boolean;
           };
           projects?: {
             defaultDirectory: string;
@@ -155,7 +163,12 @@ declare global {
           repository: { branchPrefix?: string; pushOnCreate?: boolean };
           projectPrep: { autoInstallOnOpenInEditor?: boolean };
           browserPreview: { enabled?: boolean; engine?: 'chromium' };
-          notifications: { enabled?: boolean; sound?: boolean };
+          notifications: {
+            enabled?: boolean;
+            sound?: boolean;
+            osNotifications?: boolean;
+            soundFocusMode?: 'always' | 'unfocused';
+          };
           mcp: {
             context7?: {
               enabled?: boolean;
@@ -166,6 +179,7 @@ declare global {
           tasks?: {
             autoGenerateName?: boolean;
             autoApproveByDefault?: boolean;
+            autoTrustWorktrees?: boolean;
           };
           projects?: {
             defaultDirectory?: string;
@@ -236,7 +250,12 @@ declare global {
           repository: { branchPrefix: string; pushOnCreate: boolean };
           projectPrep?: { autoInstallOnOpenInEditor: boolean };
           browserPreview?: { enabled: boolean; engine: 'chromium' };
-          notifications?: { enabled: boolean; sound: boolean };
+          notifications?: {
+            enabled: boolean;
+            sound: boolean;
+            osNotifications: boolean;
+            soundFocusMode: 'always' | 'unfocused';
+          };
           mcp?: {
             context7?: {
               enabled: boolean;
@@ -247,6 +266,7 @@ declare global {
           tasks?: {
             autoGenerateName: boolean;
             autoApproveByDefault: boolean;
+            autoTrustWorktrees: boolean;
           };
           projects?: {
             defaultDirectory: string;
@@ -363,6 +383,9 @@ declare global {
         listener: (info: { exitCode: number; signal?: number }) => void
       ) => () => void;
       onPtyStarted: (listener: (data: { id: string }) => void) => () => void;
+      onAgentEvent: (
+        listener: (event: AgentEvent, meta: { appFocused: boolean }) => void
+      ) => () => void;
       terminalGetTheme: () => Promise<{
         ok: boolean;
         config?: {
@@ -1170,7 +1193,7 @@ declare global {
         useAgent?: boolean;
         password?: string;
         passphrase?: string;
-      }) => Promise<{ success: boolean; error?: string; latency?: number }>;
+      }) => Promise<{ success: boolean; error?: string; latency?: number; debugLogs?: string[] }>;
       sshSaveConnection: (config: {
         id?: string;
         name: string;
@@ -1380,6 +1403,9 @@ export interface ElectronAPI {
     listener: (info: { exitCode: number; signal?: number }) => void
   ) => () => void;
   onPtyStarted: (listener: (data: { id: string }) => void) => () => void;
+  onAgentEvent: (
+    listener: (event: AgentEvent, meta: { appFocused: boolean }) => void
+  ) => () => void;
 
   // Worktree management
   worktreeCreate: (args: {

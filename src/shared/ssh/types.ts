@@ -62,6 +62,7 @@ export interface ConnectionTestResult {
   error?: string;
   latency?: number;
   serverVersion?: string;
+  debugLogs?: string[];
 }
 
 /**
@@ -115,4 +116,5 @@ export interface SshConfigHost {
   user?: string;
   port?: number;
   identityFile?: string;
+  identityAgent?: string;
 }

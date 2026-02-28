@@ -195,6 +195,10 @@ vi.mock('../../main/services/DatabaseService', () => ({
   databaseService: {},
 }));
 
+vi.mock('../../main/services/ClaudeConfigService', () => ({
+  maybeAutoTrustForClaude: vi.fn(),
+}));
+
 describe('ptyIpc notification lifecycle', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -279,7 +283,7 @@ describe('ptyIpc notification lifecycle', () => {
     expect(written).toContain('claude');
   });
 
-  it('shows completion notification on normal successful process exit', async () => {
+  it('does not show completion notification on process exit (moved to AgentEventService)', async () => {
     const { registerPtyIpc } = await import('../../main/services/ptyIpc');
     registerPtyIpc();
 
@@ -297,8 +301,9 @@ describe('ptyIpc notification lifecycle', () => {
 
     proc!.emitExit(0, undefined);
 
-    expect(notificationCtor).toHaveBeenCalledTimes(1);
-    expect(notificationShow).toHaveBeenCalledTimes(1);
+    // OS notifications are now driven by hook events in AgentEventService, not PTY exit
+    expect(notificationCtor).not.toHaveBeenCalled();
+    expect(notificationShow).not.toHaveBeenCalled();
   });
 
   it('keeps replacement PTY writable after direct CLI exit triggers shell respawn', async () => {
