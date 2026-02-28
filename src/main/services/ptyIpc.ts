@@ -33,7 +33,7 @@ import { execFile } from 'child_process';
 import { randomUUID } from 'crypto';
 import path from 'path';
 import { quoteShellArg } from '../utils/shellEscape';
-import { isWslPath, toWslPosixPath, getWslHomeUncPath } from '../utils/wslPath';
+import { getClaudeProjectDir } from '../utils/wslPath';
 
 const owners = new Map<string, WebContents>();
 const listeners = new Set<string>();
@@ -419,10 +419,7 @@ export function registerPtyIpc(): void {
 
               if (isClaudeOrSimilar) {
                 // Claude stores sessions in ~/.claude/projects/ with various naming schemes
-                // When running inside WSL, Claude sees the POSIX path, not the UNC path.
-                const isWsl = process.platform === 'win32' && isWslPath(cwd);
-                const effectiveCwd = isWsl ? toWslPosixPath(cwd) : cwd;
-                const homeBase = isWsl ? getWslHomeUncPath(cwd) : os.homedir();
+                const { effectiveCwd, homeBase } = getClaudeProjectDir(cwd);
 
                 // Check both hash-based and path-based directory names
                 const cwdHash = crypto
