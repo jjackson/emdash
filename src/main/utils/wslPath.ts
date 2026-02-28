@@ -15,6 +15,7 @@ import {
   execFile,
   execFileSync,
   exec,
+  spawn,
   type ExecFileOptions,
   type ExecOptions,
 } from 'child_process';
@@ -159,7 +160,6 @@ export function wslAwareSpawn(
   args: readonly string[],
   options: import('child_process').SpawnOptions
 ): import('child_process').ChildProcess {
-  const { spawn } = require('child_process') as typeof import('child_process');
   const cwd = options.cwd?.toString();
   if (!cwd || process.platform !== 'win32' || !isWslPath(cwd)) {
     return spawn(command, [...args], options);
@@ -169,11 +169,10 @@ export function wslAwareSpawn(
   const posixCwd = toWslPosixPath(cwd);
   const base = path.basename(command).replace(/\.(exe|cmd|bat)$/i, '');
 
-  return spawn(
-    'wsl.exe',
-    ['-d', distro, '--cd', posixCwd, '--', base, ...args],
-    { ...options, cwd: os.homedir() }
-  );
+  return spawn('wsl.exe', ['-d', distro, '--cd', posixCwd, '--', base, ...args], {
+    ...options,
+    cwd: os.homedir(),
+  });
 }
 
 // ── PTY helper ──────────────────────────────────────────────────────

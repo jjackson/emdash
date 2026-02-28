@@ -214,13 +214,9 @@ export class WorktreePoolService {
     const resolvedRef = await this.resolveToRemoteRef(projectPath, baseRef);
 
     // Create the worktree
-    await execFileAsync(
-      'git',
-      ['worktree', 'add', '-b', reserveBranch, reservePath, resolvedRef],
-      {
-        cwd: projectPath,
-      }
-    );
+    await execFileAsync('git', ['worktree', 'add', '-b', reserveBranch, reservePath, resolvedRef], {
+      cwd: projectPath,
+    });
 
     const reserveId = this.stableIdFromPath(reservePath);
     const reserve: ReserveWorktree = {

@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { isWslPath, getWslDistro, toWslPosixPath, toWindowsUncPath, getClaudeProjectDir } from '../wslPath';
+import {
+  isWslPath,
+  getWslDistro,
+  toWslPosixPath,
+  toWindowsUncPath,
+  getClaudeProjectDir,
+} from '../wslPath';
 
 describe('isWslPath', () => {
   it('detects \\\\wsl$\\Distro paths', () => {
