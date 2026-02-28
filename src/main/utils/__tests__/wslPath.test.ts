@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isWslPath, getWslDistro, toWslPosixPath, toWindowsUncPath } from '../wslPath';
+import { isWslPath, getWslDistro, toWslPosixPath, toWindowsUncPath, getClaudeProjectDir } from '../wslPath';
 
 describe('isWslPath', () => {
   it('detects \\\\wsl$\\Distro paths', () => {
@@ -82,5 +82,13 @@ describe('toWindowsUncPath', () => {
     const distro = getWslDistro(original)!;
     const posix = toWslPosixPath(original);
     expect(toWindowsUncPath(distro, posix)).toBe(original);
+  });
+});
+
+describe('getClaudeProjectDir', () => {
+  it('returns cwd and homedir unchanged for non-WSL paths', () => {
+    const result = getClaudeProjectDir('C:\\Users\\test\\project');
+    expect(result.effectiveCwd).toBe('C:\\Users\\test\\project');
+    expect(result.homeBase).toBeTruthy();
   });
 });

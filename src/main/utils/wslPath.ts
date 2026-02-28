@@ -143,6 +143,39 @@ export async function wslExec(
   return nodeExec(wslCommand, wslOptions) as Promise<{ stdout: string; stderr: string }>;
 }
 
+// ── Spawn wrapper ────────────────────────────────────────────────────
+
+/**
+ * Drop-in replacement for `child_process.spawn()`.
+ *
+ * When `options.cwd` is a WSL UNC path, the command is routed through
+ * `wsl.exe -d <distro> --cd <posixCwd> -- <command> <args>`.
+ *
+ * For non-WSL paths (or non-Windows platforms) it delegates directly to
+ * `child_process.spawn()`.
+ */
+export function wslAwareSpawn(
+  command: string,
+  args: readonly string[],
+  options: import('child_process').SpawnOptions
+): import('child_process').ChildProcess {
+  const { spawn } = require('child_process') as typeof import('child_process');
+  const cwd = options.cwd?.toString();
+  if (!cwd || process.platform !== 'win32' || !isWslPath(cwd)) {
+    return spawn(command, [...args], options);
+  }
+
+  const distro = getWslDistro(cwd)!;
+  const posixCwd = toWslPosixPath(cwd);
+  const base = path.basename(command).replace(/\.(exe|cmd|bat)$/i, '');
+
+  return spawn(
+    'wsl.exe',
+    ['-d', distro, '--cd', posixCwd, '--', base, ...args],
+    { ...options, cwd: os.homedir() }
+  );
+}
+
 // ── PTY helper ──────────────────────────────────────────────────────
 
 export interface WslPtyConfig {
@@ -208,4 +241,27 @@ export function getWslHomeUncPath(distroOrWslPath: string): string {
     wslHomeCache.set(distro, fallback);
     return fallback;
   }
+}
+
+// ── Claude project directory resolution ──────────────────────────────
+
+/**
+ * Return the effective working directory and home base path for Claude
+ * session file lookups. Handles WSL path translation transparently.
+ *
+ * Claude stores sessions in `~/.claude/projects/<encoded-cwd>/`.
+ * Inside WSL, Claude encodes POSIX paths (not UNC paths), and the
+ * home directory lives on the WSL filesystem.
+ */
+export function getClaudeProjectDir(cwd: string): { effectiveCwd: string; homeBase: string } {
+  if (process.platform === 'win32' && isWslPath(cwd)) {
+    return {
+      effectiveCwd: toWslPosixPath(cwd),
+      homeBase: getWslHomeUncPath(cwd),
+    };
+  }
+  return {
+    effectiveCwd: cwd,
+    homeBase: os.homedir(),
+  };
 }
