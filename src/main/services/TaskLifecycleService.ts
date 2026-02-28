@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { spawn, type ChildProcess } from 'node:child_process';
+import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { lifecycleScriptsService } from './LifecycleScriptsService';
 import {
   type LifecycleEvent,
@@ -11,9 +11,12 @@ import {
 } from '@shared/lifecycle';
 import { getTaskEnvVars } from '@shared/task/envVars';
 import { log } from '../lib/logger';
-import { execFile } from 'node:child_process';
-
-const execFileAsync = promisify(execFile);
+import {
+  wslExecFile as execFileAsync,
+  isWslPath,
+  getWslDistro,
+  toWslPosixPath,
+} from '../utils/wslPath';
 
 type LifecycleResult = {
   ok: boolean;
@@ -187,12 +190,25 @@ class TaskLifecycleService extends EventEmitter {
         };
         try {
           const env = await this.buildLifecycleEnv(taskId, taskPath, projectPath, taskName);
-          const child = spawn(script, {
-            cwd: taskPath,
-            shell: true,
-            env,
-            detached: true,
-          });
+
+          // WSL paths: route through wsl.exe instead of local shell.
+          let child: ChildProcess;
+          if (process.platform === 'win32' && isWslPath(taskPath)) {
+            const distro = getWslDistro(taskPath)!;
+            const posixCwd = toWslPosixPath(taskPath);
+            child = spawn('wsl.exe', ['-d', distro, '--cd', posixCwd, '--', 'sh', '-c', script], {
+              cwd: os.homedir(),
+              env,
+              detached: true,
+            });
+          } else {
+            child = spawn(script, {
+              cwd: taskPath,
+              shell: true,
+              env,
+              detached: true,
+            });
+          }
           const untrackFinite = this.trackFiniteProcess(taskId, child);
           const onData = (buf: Buffer) => {
             const line = buf.toString();
@@ -322,12 +338,25 @@ class TaskLifecycleService extends EventEmitter {
 
     try {
       const env = await this.buildLifecycleEnv(taskId, taskPath, projectPath, taskName);
-      const child = spawn(script, {
-        cwd: taskPath,
-        shell: true,
-        env,
-        detached: true,
-      });
+
+      // WSL paths: route through wsl.exe instead of local shell.
+      let child: ChildProcess;
+      if (process.platform === 'win32' && isWslPath(taskPath)) {
+        const distro = getWslDistro(taskPath)!;
+        const posixCwd = toWslPosixPath(taskPath);
+        child = spawn('wsl.exe', ['-d', distro, '--cd', posixCwd, '--', 'sh', '-c', script], {
+          cwd: os.homedir(),
+          env,
+          detached: true,
+        });
+      } else {
+        child = spawn(script, {
+          cwd: taskPath,
+          shell: true,
+          env,
+          detached: true,
+        });
+      }
       this.runProcesses.set(taskId, child);
       state.run.pid = child.pid ?? null;
 

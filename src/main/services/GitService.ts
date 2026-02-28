@@ -1,9 +1,6 @@
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
-
-const execFileAsync = promisify(execFile);
+import { wslExecFile as execFileAsync } from '../utils/wslPath';
 const MAX_UNTRACKED_LINECOUNT_BYTES = 512 * 1024;
 const MAX_UNTRACKED_DIFF_BYTES = 512 * 1024;
 
