@@ -17,7 +17,10 @@ import { databaseService } from '../services/DatabaseService';
 import { injectIssueFooter } from '../lib/prIssueFooter';
 import { getCreatePrBodyPlan } from '../lib/prCreateBodyPlan';
 import { patchCurrentPrBodyWithIssueFooter } from '../lib/prIssueFooterPatch';
-import { wslExec as execAsync, wslExecFile as execFileAsync } from '../utils/wslPath';
+import { promisify } from 'util';
+import { exec, execFile } from 'child_process';
+const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 const GIT_STATUS_DEBOUNCE_MS = 500;
 const supportsRecursiveWatch = process.platform === 'darwin' || process.platform === 'win32';

@@ -3,7 +3,9 @@ import { join } from 'path';
 import * as fs from 'fs';
 import { getMainWindow } from '../app/window';
 import { errorTracking } from '../errorTracking';
-import { wslExec as execAsync } from '../utils/wslPath';
+import { promisify } from 'util';
+import { exec } from 'child_process';
+const execAsync = promisify(exec);
 const DEFAULT_REMOTE = 'origin';
 const DEFAULT_BRANCH = 'main';
 

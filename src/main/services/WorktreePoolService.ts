@@ -3,12 +3,9 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { log } from '../lib/logger';
 import { worktreeService, type WorktreeInfo } from './WorktreeService';
-import { wslExecFile as execFileAsync, isWslPath, toWslPosixPath } from '../utils/wslPath';
-
-/** Convert path to git-compatible form (POSIX inside WSL). */
-function gitPath(p: string): string {
-  return process.platform === 'win32' && isWslPath(p) ? toWslPosixPath(p) : p;
-}
+import { promisify } from 'util';
+import { execFile } from 'child_process';
+const execFileAsync = promisify(execFile);
 
 interface ReserveWorktree {
   id: string;
@@ -219,7 +216,7 @@ export class WorktreePoolService {
     // Create the worktree
     await execFileAsync(
       'git',
-      ['worktree', 'add', '-b', reserveBranch, gitPath(reservePath), resolvedRef],
+      ['worktree', 'add', '-b', reserveBranch, reservePath, resolvedRef],
       {
         cwd: projectPath,
       }
@@ -301,7 +298,7 @@ export class WorktreePoolService {
     const newId = this.stableIdFromPath(newPath);
 
     // Move the worktree (instant operation)
-    await execFileAsync('git', ['worktree', 'move', gitPath(reserve.path), gitPath(newPath)], {
+    await execFileAsync('git', ['worktree', 'move', reserve.path, newPath], {
       cwd: reserve.projectPath,
     });
 
@@ -381,7 +378,7 @@ export class WorktreePoolService {
   /** Cleanup a reserve worktree */
   private async cleanupReserve(reserve: ReserveWorktree): Promise<void> {
     try {
-      await execFileAsync('git', ['worktree', 'remove', '--force', gitPath(reserve.path)], {
+      await execFileAsync('git', ['worktree', 'remove', '--force', reserve.path], {
         cwd: reserve.projectPath,
       });
     } catch {
@@ -429,7 +426,7 @@ export class WorktreePoolService {
       remainingBranches
     )) {
       try {
-        await execFileAsync('git', ['worktree', 'remove', '--force', gitPath(reserve.path)], {
+        await execFileAsync('git', ['worktree', 'remove', '--force', reserve.path], {
           cwd: normalizedProjectPath,
         });
       } catch {
@@ -624,7 +621,7 @@ export class WorktreePoolService {
       const mainRepoPath = this.getMainRepoPathFromWorktree(reservePath);
       if (mainRepoPath && fs.existsSync(mainRepoPath)) {
         // Remove worktree via git
-        await execFileAsync('git', ['worktree', 'remove', '--force', gitPath(reservePath)], {
+        await execFileAsync('git', ['worktree', 'remove', '--force', reservePath], {
           cwd: mainRepoPath,
         });
 

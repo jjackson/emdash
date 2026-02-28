@@ -4,7 +4,9 @@ import * as fs from 'fs';
 import { GITHUB_CONFIG } from '../config/github.config';
 import { getMainWindow } from '../app/window';
 import { errorTracking } from '../errorTracking';
-import { wslExec as execAsync } from '../utils/wslPath';
+import { promisify } from 'util';
+import { exec } from 'child_process';
+const execAsync = promisify(exec);
 
 export interface GitHubUser {
   id: number;
