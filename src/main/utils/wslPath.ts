@@ -11,7 +11,13 @@
  */
 
 import os from 'os';
-import { execFile, exec, type ExecFileOptions, type ExecOptions } from 'child_process';
+import {
+  execFile,
+  execFileSync,
+  exec,
+  type ExecFileOptions,
+  type ExecOptions,
+} from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 
@@ -127,7 +133,7 @@ export async function wslExec(
   // Escape the command for embedding in single quotes inside sh -c.
   const escaped = command.replace(/'/g, "'\\''");
 
-  const wslCommand = `wsl.exe -d ${distro} --cd ${posixCwd} -- sh -c '${escaped}'`;
+  const wslCommand = `wsl.exe -d "${distro}" --cd "${posixCwd}" -- sh -c '${escaped}'`;
 
   const wslOptions: ExecOptions = {
     ...options,
@@ -169,4 +175,37 @@ export function getWslPtyConfig(wslUncPath: string): WslPtyConfig | null {
     distro,
     posixCwd,
   };
+}
+
+// ── WSL home directory resolution ────────────────────────────────────
+
+const wslHomeCache = new Map<string, string>();
+
+/**
+ * Get the home directory for a WSL distro, returned as a Windows UNC path.
+ * Accepts either a WSL UNC path or a distro name. Result is cached per distro.
+ *
+ *   `getWslHomeUncPath('\\\\wsl$\\Ubuntu\\home\\user\\project')`
+ *   → `'\\\\wsl$\\Ubuntu\\home\\user'`
+ */
+export function getWslHomeUncPath(distroOrWslPath: string): string {
+  const distro = isWslPath(distroOrWslPath) ? getWslDistro(distroOrWslPath)! : distroOrWslPath;
+
+  const cached = wslHomeCache.get(distro);
+  if (cached) return cached;
+
+  try {
+    const home = execFileSync('wsl.exe', ['-d', distro, '--', 'printenv', 'HOME'], {
+      encoding: 'utf8',
+      timeout: 5000,
+    }).trim();
+
+    const uncHome = toWindowsUncPath(distro, home);
+    wslHomeCache.set(distro, uncHome);
+    return uncHome;
+  } catch {
+    const fallback = toWindowsUncPath(distro, '/root');
+    wslHomeCache.set(distro, fallback);
+    return fallback;
+  }
 }

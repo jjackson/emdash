@@ -32,7 +32,7 @@ import { execFile } from 'child_process';
 import { randomUUID } from 'crypto';
 import path from 'path';
 import { quoteShellArg } from '../utils/shellEscape';
-import { isWslPath, toWslPosixPath } from '../utils/wslPath';
+import { isWslPath, toWslPosixPath, getWslHomeUncPath } from '../utils/wslPath';
 
 const owners = new Map<string, WebContents>();
 const listeners = new Set<string>();
@@ -419,8 +419,9 @@ export function registerPtyIpc(): void {
               if (isClaudeOrSimilar) {
                 // Claude stores sessions in ~/.claude/projects/ with various naming schemes
                 // When running inside WSL, Claude sees the POSIX path, not the UNC path.
-                const effectiveCwd =
-                  process.platform === 'win32' && isWslPath(cwd) ? toWslPosixPath(cwd) : cwd;
+                const isWsl = process.platform === 'win32' && isWslPath(cwd);
+                const effectiveCwd = isWsl ? toWslPosixPath(cwd) : cwd;
+                const homeBase = isWsl ? getWslHomeUncPath(cwd) : os.homedir();
 
                 // Check both hash-based and path-based directory names
                 const cwdHash = crypto
@@ -428,15 +429,15 @@ export function registerPtyIpc(): void {
                   .update(effectiveCwd)
                   .digest('hex')
                   .slice(0, 16);
-                const claudeHashDir = path.join(os.homedir(), '.claude', 'projects', cwdHash);
+                const claudeHashDir = path.join(homeBase, '.claude', 'projects', cwdHash);
 
                 // Also check for path-based directory name (Claude's actual format)
                 // Replace path separators with hyphens for the directory name
                 const pathBasedName = effectiveCwd.replace(/[/\\]/g, '-');
-                const claudePathDir = path.join(os.homedir(), '.claude', 'projects', pathBasedName);
+                const claudePathDir = path.join(homeBase, '.claude', 'projects', pathBasedName);
 
                 // Check if any Claude session directory exists for this working directory
-                const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+                const projectsDir = path.join(homeBase, '.claude', 'projects');
                 let sessionExists = false;
 
                 // Check if the hash-based directory exists

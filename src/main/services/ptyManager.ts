@@ -9,7 +9,7 @@ import { parsePtyId } from '@shared/ptyId';
 import { providerStatusCache } from './providerStatusCache';
 import { errorTracking } from '../errorTracking';
 import { getProviderCustomConfig } from '../settings';
-import { isWslPath, getWslPtyConfig, toWslPosixPath } from '../utils/wslPath';
+import { isWslPath, getWslPtyConfig, toWslPosixPath, getWslHomeUncPath } from '../utils/wslPath';
 
 /**
  * Environment variables to pass through for agent authentication.
@@ -191,9 +191,11 @@ function removeSessionEntry(ptyId: string): void {
  */
 function sessionFileExists(uuid: string, cwd: string): boolean {
   try {
-    const effectiveCwd = process.platform === 'win32' && isWslPath(cwd) ? toWslPosixPath(cwd) : cwd;
+    const isWsl = process.platform === 'win32' && isWslPath(cwd);
+    const effectiveCwd = isWsl ? toWslPosixPath(cwd) : cwd;
     const encoded = effectiveCwd.replace(/[:\\/]/g, '-');
-    const sessionFile = path.join(os.homedir(), '.claude', 'projects', encoded, `${uuid}.jsonl`);
+    const homeBase = isWsl ? getWslHomeUncPath(cwd) : os.homedir();
+    const sessionFile = path.join(homeBase, '.claude', 'projects', encoded, `${uuid}.jsonl`);
     return fs.existsSync(sessionFile);
   } catch {
     return false;
@@ -212,11 +214,13 @@ function sessionFileExists(uuid: string, cwd: string): boolean {
  */
 function discoverExistingClaudeSession(cwd: string, excludeUuids: Set<string>): string | null {
   try {
+    const isWsl = process.platform === 'win32' && isWslPath(cwd);
     // Claude inside WSL encodes POSIX paths, not UNC paths.
-    const effectiveCwd = process.platform === 'win32' && isWslPath(cwd) ? toWslPosixPath(cwd) : cwd;
+    const effectiveCwd = isWsl ? toWslPosixPath(cwd) : cwd;
     // Claude encodes project paths by replacing path separators; on Windows also strip ':'.
     const encoded = effectiveCwd.replace(/[:\\/]/g, '-');
-    const projectDir = path.join(os.homedir(), '.claude', 'projects', encoded);
+    const homeBase = isWsl ? getWslHomeUncPath(cwd) : os.homedir();
+    const projectDir = path.join(homeBase, '.claude', 'projects', encoded);
 
     if (!fs.existsSync(projectDir)) return null;
 

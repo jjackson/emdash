@@ -1,7 +1,12 @@
 import { spawn } from 'child_process';
 import { log } from '../lib/logger';
 import { getProvider, PROVIDER_IDS, type ProviderId } from '../../shared/providers/registry';
-import { wslExec as execAsync, wslExecFile as execFileAsync } from '../utils/wslPath';
+import {
+  wslExec as execAsync,
+  wslExecFile as execFileAsync,
+  isWslPath,
+  getWslPtyConfig,
+} from '../utils/wslPath';
 
 export interface GeneratedPrContent {
   title: string;
@@ -289,17 +294,29 @@ export class PrGenerationService {
         promptViaStdin = false;
       }
 
-      // Spawn the provider CLI
-      const child = spawn(cliCommand, args, {
-        cwd: taskPath,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          // Ensure we have a proper terminal environment
-          TERM: 'xterm-256color',
-          COLORTERM: 'truecolor',
-        },
-      });
+      // Spawn the provider CLI (WSL-aware)
+      const wslConfig =
+        process.platform === 'win32' && isWslPath(taskPath) ? getWslPtyConfig(taskPath) : null;
+
+      const child = wslConfig
+        ? spawn('wsl.exe', [...wslConfig.args, '--', cliCommand, ...args], {
+            cwd: wslConfig.cwd,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            env: {
+              ...process.env,
+              TERM: 'xterm-256color',
+              COLORTERM: 'truecolor',
+            },
+          })
+        : spawn(cliCommand, args, {
+            cwd: taskPath,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            env: {
+              ...process.env,
+              TERM: 'xterm-256color',
+              COLORTERM: 'truecolor',
+            },
+          });
 
       // Set timeout
       const timeoutId = setTimeout(() => {
