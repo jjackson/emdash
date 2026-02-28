@@ -9,7 +9,7 @@ import { parsePtyId } from '@shared/ptyId';
 import { providerStatusCache } from './providerStatusCache';
 import { errorTracking } from '../errorTracking';
 import { getProviderCustomConfig } from '../settings';
-import { isWslPath, getWslPtyConfig, toWslPosixPath, getWslHomeUncPath } from '../utils/wslPath';
+import { isWslPath, getWslPtyConfig, getClaudeProjectDir } from '../utils/wslPath';
 import { agentEventService } from './AgentEventService';
 
 /**
@@ -192,10 +192,8 @@ function removeSessionEntry(ptyId: string): void {
  */
 function sessionFileExists(uuid: string, cwd: string): boolean {
   try {
-    const isWsl = process.platform === 'win32' && isWslPath(cwd);
-    const effectiveCwd = isWsl ? toWslPosixPath(cwd) : cwd;
+    const { effectiveCwd, homeBase } = getClaudeProjectDir(cwd);
     const encoded = effectiveCwd.replace(/[:\\/]/g, '-');
-    const homeBase = isWsl ? getWslHomeUncPath(cwd) : os.homedir();
     const sessionFile = path.join(homeBase, '.claude', 'projects', encoded, `${uuid}.jsonl`);
     return fs.existsSync(sessionFile);
   } catch {
@@ -215,12 +213,9 @@ function sessionFileExists(uuid: string, cwd: string): boolean {
  */
 function discoverExistingClaudeSession(cwd: string, excludeUuids: Set<string>): string | null {
   try {
-    const isWsl = process.platform === 'win32' && isWslPath(cwd);
-    // Claude inside WSL encodes POSIX paths, not UNC paths.
-    const effectiveCwd = isWsl ? toWslPosixPath(cwd) : cwd;
+    const { effectiveCwd, homeBase } = getClaudeProjectDir(cwd);
     // Claude encodes project paths by replacing path separators; on Windows also strip ':'.
     const encoded = effectiveCwd.replace(/[:\\/]/g, '-');
-    const homeBase = isWsl ? getWslHomeUncPath(cwd) : os.homedir();
     const projectDir = path.join(homeBase, '.claude', 'projects', encoded);
 
     if (!fs.existsSync(projectDir)) return null;
@@ -904,190 +899,6 @@ function getDefaultShell(): string {
     return process.env.ComSpec || 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
   }
   return process.env.SHELL || '/bin/bash';
-}
-
-/**
- * Compute the spawn configuration for a PTY, handling WSL paths.
- * Exported for testing — this is the pure arg-building logic without
- * the node-pty native module dependency.
- */
-export function computePtySpawnConfig(options: {
-  id: string;
-  shell?: string;
-  cwd?: string;
-  autoApprove?: boolean;
-  initialPrompt?: string;
-  skipResume?: boolean;
-  shellSetup?: string;
-}): {
-  command: string;
-  args: string[];
-  cwd: string;
-  shell: string;
-  env: Record<string, string>;
-} {
-  const { id, shell, cwd, autoApprove, initialPrompt, skipResume, shellSetup } = options;
-
-  const defaultShell = getDefaultShell();
-  let useShell = shell || defaultShell;
-  const useCwd = cwd || process.cwd() || os.homedir();
-
-  const wslConfig =
-    process.platform === 'win32' && isWslPath(useCwd) ? getWslPtyConfig(useCwd) : null;
-
-  // On Windows, resolve shell command to full path for node-pty.
-  // Skip for WSL paths — CLI resolution happens inside the WSL distro.
-  if (
-    process.platform === 'win32' &&
-    !wslConfig &&
-    shell &&
-    !shell.includes('\\') &&
-    !shell.includes('/')
-  ) {
-    try {
-      const { execSync } = require('child_process');
-      let resolved = '';
-      try {
-        resolved = execSync(`where ${shell}.cmd`, { encoding: 'utf8' })
-          .trim()
-          .split('\n')[0]
-          .replace(/\r/g, '')
-          .trim();
-      } catch {
-        resolved = execSync(`where ${shell}`, { encoding: 'utf8' })
-          .trim()
-          .split('\n')[0]
-          .replace(/\r/g, '')
-          .trim();
-      }
-      if (resolved && !resolved.match(/\.(exe|cmd|bat)$/i)) {
-        try {
-          if (fs.existsSync(resolved + '.cmd')) resolved = resolved + '.cmd';
-        } catch {}
-      }
-      if (resolved) useShell = resolved;
-    } catch {}
-  }
-
-  const useEnv: Record<string, string> = {
-    TERM: 'xterm-256color',
-    COLORTERM: 'truecolor',
-    TERM_PROGRAM: 'emdash',
-    HOME: process.env.HOME || os.homedir(),
-    USER: process.env.USER || os.userInfo().username,
-    SHELL: process.env.SHELL || defaultShell,
-  };
-
-  const args: string[] = [];
-  if (process.platform !== 'win32' || wslConfig) {
-    try {
-      const base = String(useShell).split(/[/\\]/).pop() || '';
-      const baseLower = base.toLowerCase().replace(/\.(exe|cmd|bat)$/i, '');
-      const provider = PROVIDERS.find((p) => p.cli === baseLower);
-
-      if (provider) {
-        const resolvedConfig = resolveProviderCommandConfig(provider.id);
-        let resolvedCli = resolvedConfig?.cli || provider.cli || baseLower;
-        if (wslConfig) {
-          resolvedCli =
-            resolvedCli
-              .split(/[/\\]/)
-              .pop()
-              ?.replace(/\.(exe|cmd|bat)$/i, '') || resolvedCli;
-        }
-
-        const cliArgs: string[] = [];
-        const usedSessionIsolation = applySessionIsolation(
-          cliArgs,
-          provider,
-          id,
-          useCwd,
-          !skipResume
-        );
-
-        cliArgs.push(
-          ...buildProviderCliArgs({
-            resume: !usedSessionIsolation && !skipResume,
-            resumeFlag: resolvedConfig?.resumeFlag,
-            defaultArgs: resolvedConfig?.defaultArgs,
-            extraArgs: resolvedConfig?.extraArgs,
-            autoApprove,
-            autoApproveFlag: resolvedConfig?.autoApproveFlag,
-            initialPrompt,
-            initialPromptFlag: resolvedConfig?.initialPromptFlag,
-            useKeystrokeInjection: provider.useKeystrokeInjection,
-          })
-        );
-
-        if (resolvedConfig?.env) {
-          for (const [k, v] of Object.entries(resolvedConfig.env)) {
-            if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && typeof v === 'string') {
-              useEnv[k] = v;
-            }
-          }
-        }
-
-        const cliCommand = resolvedCli;
-        const commandString =
-          cliArgs.length > 0
-            ? `${cliCommand} ${cliArgs
-                .map((arg) =>
-                  /[\s'"\\$`\n\r\t]/.test(arg) ? `'${arg.replace(/'/g, "'\\''")}'` : arg
-                )
-                .join(' ')}`
-            : cliCommand;
-
-        const chainShell = wslConfig ? 'bash' : defaultShell;
-        const resumeShell = `'${chainShell.replace(/'/g, "'\\''")}' -il`;
-        const chainCommand = shellSetup
-          ? `${shellSetup} && ${commandString}; exec ${resumeShell}`
-          : `${commandString}; exec ${resumeShell}`;
-
-        useShell = chainShell;
-        const shellBase = chainShell.split('/').pop() || '';
-        if (shellBase === 'zsh') args.push('-lic', chainCommand);
-        else if (shellBase === 'bash') args.push('-lic', chainCommand);
-        else if (shellBase === 'fish') args.push('-ic', chainCommand);
-        else if (shellBase === 'sh') args.push('-lc', chainCommand);
-        else args.push('-c', chainCommand);
-      } else {
-        if (shellSetup) {
-          const cFlag = base === 'fish' ? '-ic' : base === 'sh' ? '-lc' : '-lic';
-          const resumeShell = `'${(wslConfig ? 'bash' : useShell).replace(/'/g, "'\\''")}' -il`;
-          args.push(cFlag, `${shellSetup}; exec ${resumeShell}`);
-        } else {
-          args.push(
-            base === 'zsh' || base === 'bash' || base === 'fish' || base === 'sh' ? '-il' : '-i'
-          );
-        }
-      }
-    } catch {}
-
-    if (wslConfig) {
-      useShell = 'bash';
-    }
-  }
-
-  let spawnCommand: string;
-  let spawnArgs: string[];
-  let spawnCwd: string;
-
-  if (wslConfig) {
-    if (args.length > 0) {
-      spawnCommand = 'wsl.exe';
-      spawnArgs = [...wslConfig.args, '--', useShell, ...args];
-    } else {
-      spawnCommand = 'wsl.exe';
-      spawnArgs = [...wslConfig.args];
-    }
-    spawnCwd = wslConfig.cwd;
-  } else {
-    spawnCommand = useShell;
-    spawnArgs = args;
-    spawnCwd = useCwd;
-  }
-
-  return { command: spawnCommand, args: spawnArgs, cwd: spawnCwd, shell: useShell, env: useEnv };
 }
 
 export async function startPty(options: {
