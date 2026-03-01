@@ -89,7 +89,23 @@ function resolveWindowsPtySpawn(
 ): { command: string; args: string[] } {
   if (process.platform !== 'win32') return { command, args };
 
-  const ext = path.extname(command).toLowerCase();
+  let ext = path.extname(command).toLowerCase();
+
+  // Extensionless files on Windows are likely POSIX shell scripts installed by
+  // npm alongside a .cmd wrapper.  Prefer the .cmd wrapper so node-pty can
+  // execute it via cmd.exe instead of failing with ERROR_BAD_EXE_FORMAT (193).
+  if (!ext) {
+    const cmdCandidate = `${command}.cmd`;
+    try {
+      if (fs.statSync(cmdCandidate).isFile()) {
+        command = cmdCandidate;
+        ext = '.cmd';
+      }
+    } catch {
+      // no .cmd sibling — fall through
+    }
+  }
+
   if (ext === '.cmd' || ext === '.bat') {
     const comspec = process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe';
     const cmdArg = /\s/.test(command) ? `"${command}"` : command;

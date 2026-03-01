@@ -15,6 +15,7 @@ import {
   shouldMapShiftEnterToCtrlJ,
   shouldPasteToTerminal,
 } from './terminalKeybindings';
+import { setupDECModeTracking } from './terminalModeTracker';
 
 const SNAPSHOT_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 const MAX_DATA_WINDOW_BYTES = 128 * 1024 * 1024; // 128 MB soft guardrail
@@ -193,121 +194,13 @@ export class TerminalSessionManager {
     this.terminal.loadAddon(this.serializeAddon);
     this.terminal.loadAddon(this.webLinksAddon);
 
-    // Work around xterm.js 6.0.0 bug: the built-in DECRQM (Request Mode)
-    // handler crashes with "r is not defined" when TUI apps (e.g. Amp) send
-    // mode-query escape sequences (CSI Ps $ p / CSI ? Ps $ p).
-    // Register custom handlers that intercept these sequences before the
-    // buggy built-in handler runs, and send back a proper DECRPM response.
-    // Response format: CSI [?] Ps ; Pm $ y
-    // Pm values: 0=not recognized, 1=set, 2=reset, 3=permanently set, 4=permanently reset
+    // Work around xterm.js 6.0.0 DECRQM bug — see terminalModeTracker.ts
     try {
       const parser = (this.terminal as any).parser;
-      if (parser?.registerCsiHandler) {
-        const ptyId = this.id;
-
-        // DEC private mode default states for accurate DECRQM responses.
-        // Covers all modes that xterm.js 6.0 supports so TUI apps get proper
-        // capability detection. Returning accurate state (instead of blanket
-        // "not recognized") lets TUI apps like Claude Code properly manage
-        // cursor visibility, scroll regions, synchronized output, and other
-        // modes — preventing state corruption and ghost cursors.
-        const decModeDefaults: Record<number, number> = {
-          1: 2, // DECCKM: reset (normal cursor keys)
-          6: 2, // DECOM: reset (absolute cursor addressing)
-          7: 1, // DECAWM: set (auto wraparound on)
-          9: 2, // X10 mouse tracking: reset
-          12: 1, // att610 cursor blink: set (matches cursorBlink option)
-          25: 1, // DECTCEM: set (cursor visible)
-          45: 2, // Reverse wrap-around: reset
-          47: 2, // Alt screen buffer (legacy): reset
-          66: 2, // DECNKM: reset (numeric keypad)
-          1000: 2, // Normal mouse tracking: reset
-          1002: 2, // Cell motion mouse tracking: reset
-          1003: 2, // All motion mouse tracking: reset
-          1004: 2, // Focus tracking: reset
-          1005: 2, // UTF-8 mouse mode: reset
-          1006: 2, // SGR mouse mode: reset
-          1015: 2, // URXVT mouse mode: reset
-          1016: 2, // SGR-Pixels mouse mode: reset
-          1047: 2, // Alt screen buffer (variant): reset
-          1048: 2, // Save/restore cursor (mode): reset
-          1049: 2, // Alt screen buffer + save cursor: reset (main screen)
-          2004: 2, // Bracketed paste: reset (off)
-          2026: 2, // Synchronized output: reset (off, but supported)
-        };
-
-        // Track runtime DEC mode state so DECRQM responses stay accurate
-        // after TUI apps toggle modes via CSI ? h / CSI ? l.
-        const decModeState = new Map<number, number>(
-          Object.entries(decModeDefaults).map(([k, v]) => [Number(k), v])
-        );
-
-        // Track CSI ? h (set) — update tracked modes to "set" (1)
-        const decSetDisp = parser.registerCsiHandler(
-          { prefix: '?', final: 'h' },
-          (params: (number | number[])[]) => {
-            for (const p of params) {
-              if (typeof p === 'number' && decModeState.has(p)) {
-                decModeState.set(p, 1);
-              }
-            }
-            return false; // let xterm.js also process the sequence
-          }
-        );
-
-        // Track CSI ? l (reset) — update tracked modes to "reset" (2)
-        const decResetDisp = parser.registerCsiHandler(
-          { prefix: '?', final: 'l' },
-          (params: (number | number[])[]) => {
-            for (const p of params) {
-              if (typeof p === 'number' && decModeState.has(p)) {
-                decModeState.set(p, 2);
-              }
-            }
-            return false; // let xterm.js also process the sequence
-          }
-        );
-
-        // Track DECSTR (CSI ! p) — reset all tracked modes to defaults.
-        // When xterm.js processes a soft reset it restores default mode state;
-        // keep our shadow map in sync so subsequent DECRQM responses are accurate.
-        const decStrDisp = parser.registerCsiHandler(
-          { intermediates: '!', final: 'p' },
-          () => {
-            for (const [k, v] of Object.entries(decModeDefaults)) {
-              decModeState.set(Number(k), v);
-            }
-            return false; // let xterm.js also process the reset
-          }
-        );
-
-        // ANSI mode request: CSI Ps $ p  →  respond CSI Ps ; 0 $ y
-        const ansiDisp = parser.registerCsiHandler(
-          { intermediates: '$', final: 'p' },
-          (params: (number | number[])[]) => {
-            const mode = (params[0] as number) ?? 0;
-            window.electronAPI.ptyInput({ id: ptyId, data: `\x1b[${mode};0$y` });
-            return true;
-          }
-        );
-        // DEC private mode request: CSI ? Ps $ p  →  respond CSI ? Ps ; Pm $ y
-        const decDisp = parser.registerCsiHandler(
-          { prefix: '?', intermediates: '$', final: 'p' },
-          (params: (number | number[])[]) => {
-            const mode = (params[0] as number) ?? 0;
-            const pm = decModeState.get(mode) ?? 0;
-            window.electronAPI.ptyInput({ id: ptyId, data: `\x1b[?${mode};${pm}$y` });
-            return true;
-          }
-        );
-        this.disposables.push(
-          () => ansiDisp.dispose(),
-          () => decDisp.dispose(),
-          () => decSetDisp.dispose(),
-          () => decResetDisp.dispose(),
-          () => decStrDisp.dispose()
-        );
-      }
+      const cleanups = setupDECModeTracking(parser, this.id, (args) =>
+        window.electronAPI.ptyInput(args)
+      );
+      this.disposables.push(...cleanups);
     } catch (err) {
       log.warn('Failed to register DECRQM workaround handlers', { error: err });
     }

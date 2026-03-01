@@ -346,7 +346,20 @@ class ConnectionsService {
         .split(/\r?\n/)
         .map((l) => l.trim())
         .filter(Boolean);
-      return lines[0] ?? null;
+      if (lines.length === 0) return null;
+
+      // On Windows, `where` may return an extensionless POSIX shell script
+      // before the .cmd/.exe wrapper.  Prefer a native Windows executable.
+      if (process.platform === 'win32' && lines.length > 1) {
+        const windowsExts = ['.cmd', '.bat', '.exe', '.com'];
+        const native = lines.find((l) => {
+          const ext = l.slice(l.lastIndexOf('.')).toLowerCase();
+          return windowsExts.includes(ext);
+        });
+        if (native) return native;
+      }
+
+      return lines[0];
     } catch {
       return null;
     }
