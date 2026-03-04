@@ -331,6 +331,14 @@ export function useTaskManagement() {
     setShowKanban(false);
     setActiveTask(task);
     setActiveTaskAgent(getAgentForTask(task));
+    setShowHomeView(false);
+    // Ensure the parent project is selected (e.g. when navigating from Home)
+    if (!selectedProject || selectedProject.id !== task.projectId) {
+      const project = projects.find((p) => p.id === task.projectId);
+      if (project) {
+        setSelectedProject(project);
+      }
+    }
     saveActiveIds(task.projectId, task.id);
   };
 

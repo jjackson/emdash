@@ -20,7 +20,7 @@ function runElectronRebuild(onlyModules) {
 
   const result =
     process.platform === 'win32'
-      ? spawnSync(electronRebuildBin, args, { stdio: 'inherit', shell: true })
+      ? spawnSync(`"${electronRebuildBin}"`, args, { stdio: 'inherit', shell: true })
       : spawnSync(electronRebuildBin, args, { stdio: 'inherit' });
 
   if (result.error) {

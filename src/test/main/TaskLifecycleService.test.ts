@@ -14,13 +14,10 @@ const spawnMock = vi.fn();
 const execFileMock = vi.fn();
 const getScriptMock = vi.fn();
 
-const childProcessMock = {
+vi.mock('node:child_process', () => ({
   spawn: (...args: any[]) => spawnMock(...args),
   execFile: (...args: any[]) => execFileMock(...args),
-  exec: vi.fn(),
-};
-vi.mock('node:child_process', () => childProcessMock);
-vi.mock('child_process', () => childProcessMock);
+}));
 
 vi.mock('../../main/services/LifecycleScriptsService', () => ({
   lifecycleScriptsService: {

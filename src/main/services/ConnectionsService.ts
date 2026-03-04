@@ -242,7 +242,10 @@ class ConnectionsService {
     args: string[],
     timeoutMs: number
   ): Promise<CommandResult> {
-    const shell = process.env.SHELL || (process.platform === 'win32' ? 'cmd.exe' : '/bin/sh');
+    // On Windows, always use cmd.exe for detection — process.env.SHELL may point
+    // to Git Bash which loads login profiles and takes 6+ seconds, blowing past
+    // the detection timeout.  cmd.exe finds .cmd wrappers instantly via PATHEXT.
+    const shell = process.platform === 'win32' ? 'cmd.exe' : process.env.SHELL || '/bin/sh';
     const fullCmd = [command, ...args].join(' ');
     const shellArgs = process.platform === 'win32' ? ['/c', fullCmd] : ['-lc', fullCmd];
     const result = await this.runCommand(shell, shellArgs, timeoutMs);
@@ -276,12 +279,19 @@ class ConnectionsService {
           (lowerExecutable.endsWith('.cmd') || lowerExecutable.endsWith('.bat'));
 
         const child = shouldUseCmdExe
-          ? spawn(process.env.ComSpec || 'cmd.exe', [
-              '/d',
-              '/s',
-              '/c',
-              [executable, ...args].map(quoteForCmdExe).join(' '),
-            ])
+          ? spawn(
+              process.env.ComSpec || 'cmd.exe',
+              [
+                '/d',
+                '/s',
+                '/c',
+                // Wrap in outer quotes so /s strips them while preserving inner quoting
+                // (needed for paths with spaces). windowsVerbatimArguments prevents
+                // Node from double-escaping the quotes we already added for cmd.exe.
+                `"${[executable, ...args].map(quoteForCmdExe).join(' ')}"`,
+              ],
+              { windowsVerbatimArguments: true }
+            )
           : spawn(command, args);
 
         let stdout = '';

@@ -1,6 +1,7 @@
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
-import { wslExecFile as execFileAsync } from '../utils/wslPath';
 import {
   parseDiffLines,
   stripTrailingNewline,
@@ -8,6 +9,8 @@ import {
   MAX_DIFF_OUTPUT_BYTES,
 } from '../utils/diffParser';
 import type { DiffLine, DiffResult } from '../utils/diffParser';
+
+const execFileAsync = promisify(execFile);
 const MAX_UNTRACKED_LINECOUNT_BYTES = 512 * 1024;
 
 async function countFileNewlinesCapped(filePath: string, maxBytes: number): Promise<number | null> {

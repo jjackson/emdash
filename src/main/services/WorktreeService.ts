@@ -1,21 +1,16 @@
+import { execFile } from 'child_process';
 import { log } from '../lib/logger';
+import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { projectSettingsService } from './ProjectSettingsService';
 import { minimatch } from 'minimatch';
 import { errorTracking } from '../errorTracking';
-import { wslExecFile as execFileAsync, isWslPath, toWslPosixPath } from '../utils/wslPath';
 
 type BaseRefInfo = { remote: string; branch: string; fullRef: string };
 
-/**
- * Convert a path to its git-compatible form.
- * Inside WSL, git arguments must use POSIX paths, not UNC paths.
- */
-function gitPath(p: string): string {
-  return process.platform === 'win32' && isWslPath(p) ? toWslPosixPath(p) : p;
-}
+const execFileAsync = promisify(execFile);
 
 export interface WorktreeInfo {
   id: string;
@@ -239,7 +234,7 @@ export class WorktreeService {
       // Create the worktree
       const { stdout, stderr } = await execFileAsync(
         'git',
-        ['worktree', 'add', '-b', branchName, gitPath(worktreePath), fetchedBaseRef.fullRef],
+        ['worktree', 'add', '-b', branchName, worktreePath, fetchedBaseRef.fullRef],
         { cwd: projectPath }
       );
 
@@ -482,7 +477,7 @@ export class WorktreeService {
       // Remove the worktree directory via git first
       try {
         // Use --force to remove even when there are untracked/modified files
-        await execFileAsync('git', ['worktree', 'remove', '--force', gitPath(pathToRemove)], {
+        await execFileAsync('git', ['worktree', 'remove', '--force', pathToRemove], {
           cwd: projectPath,
         });
       } catch (gitError) {
@@ -1211,7 +1206,7 @@ export class WorktreeService {
     }
 
     try {
-      await execFileAsync('git', ['worktree', 'add', gitPath(worktreePath), branchName], {
+      await execFileAsync('git', ['worktree', 'add', worktreePath, branchName], {
         cwd: projectPath,
       });
     } catch (error) {

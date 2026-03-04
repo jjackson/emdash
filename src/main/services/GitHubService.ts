@@ -1,10 +1,12 @@
-import { spawn } from 'child_process';
+import { exec, spawn } from 'child_process';
+import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
 import { GITHUB_CONFIG } from '../config/github.config';
 import { getMainWindow } from '../app/window';
 import { errorTracking } from '../errorTracking';
-import { wslExec as execAsync } from '../utils/wslPath';
+
+const execAsync = promisify(exec);
 
 export interface GitHubUser {
   id: number;

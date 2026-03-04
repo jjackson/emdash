@@ -135,6 +135,13 @@ process.on('uncaughtException', (err) => {
     console.warn('[main] Ignoring EPIPE error (PTY pipe closed):', err.message);
     return;
   }
+  // node-pty on Windows can throw "Cannot resize a pty that has already exited"
+  // from an internal Socket handler when a PTY exits before a queued resize fires.
+  // This is harmless — the PTY is already gone.
+  if (err?.message?.includes('Cannot resize a pty that has already exited')) {
+    console.warn('[main] Ignoring resize-after-exit error:', err.message);
+    return;
+  }
   // Re-throw non-EPIPE errors so Electron's default dialog still shows
   throw err;
 });
