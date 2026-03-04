@@ -19,6 +19,7 @@ import { agentEventService } from './AgentEventService';
 const AGENT_ENV_VARS = [
   'AMP_API_KEY',
   'ANTHROPIC_API_KEY',
+  'AUTOHAND_API_KEY',
   'AUGMENT_SESSION_AUTH',
   'AWS_ACCESS_KEY_ID',
   'AWS_DEFAULT_REGION',
@@ -59,6 +60,7 @@ type PtyRecord = {
   kind?: 'local' | 'ssh';
   cols?: number;
   rows?: number;
+  tmuxSessionName?: string; // Set when session is wrapped in tmux
 };
 
 const ptys = new Map<string, PtyRecord>();
@@ -112,6 +114,43 @@ function getDisplayEnv(): Record<string, string> {
   }
   return env;
 }
+
+// --- Tmux session helpers ---
+
+/**
+ * Derive a deterministic tmux session name from a PTY ID.
+ * Sanitizes to characters allowed by tmux (alphanumeric, `-`, `_`, `.`).
+ */
+export function getTmuxSessionName(ptyId: string): string {
+  // PTY ID format: {providerId}-main-{taskId} or {providerId}-chat-{conversationId}
+  // Prefix with "emdash-" and sanitize
+  const sanitized = ptyId.replace(/[^a-zA-Z0-9._-]/g, '-');
+  return `emdash-${sanitized}`;
+}
+
+/**
+ * Kill a tmux session by PTY ID. Fire-and-forget — ignores errors
+ * for non-existent sessions (e.g., tmux not installed or session already dead).
+ */
+export function killTmuxSession(ptyId: string): void {
+  const sessionName = getTmuxSessionName(ptyId);
+  try {
+    const { execFile } = require('child_process');
+    execFile('tmux', ['kill-session', '-t', sessionName], { timeout: 5000 }, (err: any) => {
+      if (!err) {
+        log.info('ptyManager:tmux - killed session', { sessionName });
+      }
+      // Ignore errors — session may not exist or tmux not installed
+    });
+  } catch {
+    // Ignore
+  }
+}
+
+// TODO: Remote tmux cleanup will be handled by the workspace provider teardown script.
+// The PTY record doesn't currently store SSH target/args, so we can't shell out
+// `ssh <target> tmux kill-session` from here. When workspace providers land, the
+// teardown script is the right place for this.
 
 function resolveWindowsPtySpawn(
   command: string,
@@ -173,6 +212,12 @@ type SessionEntry = { uuid: string; cwd: string };
 let _sessionMapPath: string | null = null;
 let _sessionMap: Record<string, SessionEntry> | null = null;
 
+/** @internal Exported for testing. Sets session map path and clears the cache. */
+export function _resetSessionMapForTest(mapPath: string): void {
+  _sessionMapPath = mapPath;
+  _sessionMap = null;
+}
+
 function sessionMapPath(): string {
   if (!_sessionMapPath) {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -190,10 +235,6 @@ function loadSessionMap(): Record<string, SessionEntry> {
     _sessionMap = {};
   }
   return _sessionMap!;
-}
-
-function getKnownSessionId(ptyId: string): string | undefined {
-  return loadSessionMap()[ptyId]?.uuid;
 }
 
 /** Check if the session map has entries for other chats of the same provider in the same cwd. */
@@ -215,7 +256,7 @@ function markSessionCreated(ptyId: string, uuid: string, cwd: string): void {
   }
 }
 
-function removeSessionEntry(ptyId: string): void {
+function removeSessionId(ptyId: string): void {
   const map = loadSessionMap();
   delete map[ptyId];
   try {
@@ -229,7 +270,7 @@ function removeSessionEntry(ptyId: string): void {
  * Check whether a Claude session file actually exists on disk.
  * Claude stores conversations as <uuid>.jsonl inside ~/.claude/projects/<encoded-cwd>/.
  */
-function sessionFileExists(uuid: string, cwd: string): boolean {
+function claudeSessionFileExists(uuid: string, cwd: string): boolean {
   try {
     const isWsl = process.platform === 'win32' && isWslPath(cwd);
     const effectiveCwd = isWsl ? toWslPosixPath(cwd) : cwd;
@@ -313,7 +354,7 @@ function getOtherSessionUuids(ptyId: string, providerId: string, cwd: string): S
  *
  * Returns true if session isolation args were added.
  */
-function applySessionIsolation(
+export function applySessionIsolation(
   cliArgs: string[],
   provider: ProviderDefinition,
   id: string,
@@ -328,17 +369,30 @@ function applySessionIsolation(
   const sessionUuid = deterministicUuid(parsed.suffix);
   const isAdditionalChat = parsed.kind === 'chat';
 
-  const knownSession = getKnownSessionId(id);
+  const entry = loadSessionMap()[id];
+  const knownSession = entry?.uuid;
   if (knownSession) {
-    // Verify the session actually exists on disk before resuming.
-    // The session map entry may be stale if a prior spawn failed before
-    // the agent created any state (e.g. binary not found, PTY crash).
-    if (sessionFileExists(knownSession, cwd)) {
+    // For Claude, validate the session still exists on disk before resuming.
+    // Also treat cwd mismatch as stale — the session belongs to a different
+    // project context and Claude would look in the wrong directory.
+    if (provider.id === 'claude') {
+      const isStale = entry.cwd !== cwd || !claudeSessionFileExists(knownSession, cwd);
+      if (isStale) {
+        log.warn('ptyManager: stale session detected, creating new session', {
+          ptyId: id,
+          staleUuid: knownSession,
+        });
+        removeSessionId(id);
+        // Fall through — the decision tree below will create a new session
+        // or the caller will use generic resume flags
+      } else {
+        cliArgs.push('--resume', knownSession);
+        return true;
+      }
+    } else {
       cliArgs.push('--resume', knownSession);
       return true;
     }
-    // Stale entry — remove it and fall through to create a fresh session.
-    removeSessionEntry(id);
   }
 
   if (isAdditionalChat) {
@@ -713,6 +767,7 @@ export function startSshPty(options: {
     USER: process.env.USER || os.userInfo().username,
     PATH: process.env.PATH || process.env.Path || '',
     ...(process.env.LANG && { LANG: process.env.LANG }),
+    ...(process.env.TMPDIR && { TMPDIR: process.env.TMPDIR }),
     ...getDisplayEnv(),
     ...(process.env.SSH_AUTH_SOCK && { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK }),
     ...(process.platform === 'win32' ? getWindowsEssentialEnv() : {}),
@@ -769,9 +824,18 @@ export function startDirectPty(options: {
   initialPrompt?: string;
   env?: Record<string, string>;
   resume?: boolean;
+  tmux?: boolean;
 }): IPty | null {
   if (process.env.EMDASH_DISABLE_PTY === '1') {
     throw new Error('PTY disabled via EMDASH_DISABLE_PTY=1');
+  }
+
+  // Tmux wrapping requires a shell — fall back to startPty() which handles tmux.
+  if (options.tmux) {
+    log.info('ptyManager:directSpawn - tmux enabled, falling back to shell spawn', {
+      id: options.id,
+    });
+    return null;
   }
 
   const {
@@ -870,6 +934,7 @@ export function startDirectPty(options: {
     // Include PATH so CLI can find its dependencies
     PATH: process.env.PATH || process.env.Path || '',
     ...(process.env.LANG && { LANG: process.env.LANG }),
+    ...(process.env.TMPDIR && { TMPDIR: process.env.TMPDIR }),
     ...getDisplayEnv(),
     ...(process.env.SSH_AUTH_SOCK && { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK }),
     ...(process.platform === 'win32' ? getWindowsEssentialEnv() : {}),
@@ -1142,6 +1207,7 @@ export async function startPty(options: {
   initialPrompt?: string;
   skipResume?: boolean;
   shellSetup?: string;
+  tmux?: boolean;
 }): Promise<IPty> {
   if (process.env.EMDASH_DISABLE_PTY === '1') {
     throw new Error('PTY disabled via EMDASH_DISABLE_PTY=1');
@@ -1157,6 +1223,7 @@ export async function startPty(options: {
     initialPrompt,
     skipResume,
     shellSetup,
+    tmux,
   } = options;
 
   const defaultShell = getDefaultShell();
@@ -1190,6 +1257,8 @@ export async function startPty(options: {
     SHELL: process.env.SHELL || defaultShell,
     ...(process.platform === 'win32' ? getWindowsEssentialEnv() : {}),
     ...(process.env.LANG && { LANG: process.env.LANG }),
+    ...(process.env.TMPDIR && { TMPDIR: process.env.TMPDIR }),
+    ...(process.env.DISPLAY && { DISPLAY: process.env.DISPLAY }),
     ...getDisplayEnv(),
     ...(process.env.SSH_AUTH_SOCK && { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK }),
     ...(env || {}),
@@ -1333,32 +1402,47 @@ export async function startPty(options: {
                 .join(' ')}`
             : cliCommand;
 
+        const shellBase = (defaultShell.split('/').pop() || '').toLowerCase();
+
         // After the provider exits, exec back into the user's shell (login+interactive)
         // Under WSL, the chain shell is always bash.
         const chainShell = wslConfig ? 'bash' : defaultShell;
-        const resumeShell = `'${chainShell.replace(/'/g, "'\\''")}' -il`;
+        const resumeShell =
+          shellBase === 'fish'
+            ? `'${chainShell.replace(/'/g, "'\\''")}' -i -l`
+            : `'${chainShell.replace(/'/g, "'\\''")}' -il`;
         const chainCommand = shellSetup
           ? `${shellSetup} && ${commandString}; exec ${resumeShell}`
           : `${commandString}; exec ${resumeShell}`;
 
         // Always use the default shell for the -c command to avoid re-detecting provider CLI
         useShell = chainShell;
-        const shellBase = chainShell.split('/').pop() || '';
         if (shellBase === 'zsh') args.push('-lic', chainCommand);
         else if (shellBase === 'bash') args.push('-lic', chainCommand);
-        else if (shellBase === 'fish') args.push('-ic', chainCommand);
+        else if (shellBase === 'fish') args.push('-l', '-i', '-c', chainCommand);
         else if (shellBase === 'sh') args.push('-lc', chainCommand);
         else args.push('-c', chainCommand); // Fallback for other shells
       } else {
         // For normal shells, use login + interactive to load user configs
         if (shellSetup) {
-          const cFlag = base === 'fish' ? '-ic' : base === 'sh' ? '-lc' : '-lic';
-          const resumeShell = `'${(wslConfig ? 'bash' : useShell).replace(/'/g, "'\\''")}' -il`;
-          args.push(cFlag, `${shellSetup}; exec ${resumeShell}`);
+          const resumeShell =
+            baseLower === 'fish'
+              ? `'${(wslConfig ? 'bash' : useShell).replace(/'/g, "'\\''")}' -i -l`
+              : `'${(wslConfig ? 'bash' : useShell).replace(/'/g, "'\\''")}' -il`;
+          if (baseLower === 'fish') {
+            args.push('-l', '-i', '-c', `${shellSetup}; exec ${resumeShell}`);
+          } else {
+            const cFlag = baseLower === 'sh' ? '-lc' : '-lic';
+            args.push(cFlag, `${shellSetup}; exec ${resumeShell}`);
+          }
         } else {
-          args.push(
-            base === 'zsh' || base === 'bash' || base === 'fish' || base === 'sh' ? '-il' : '-i'
-          );
+          if (baseLower === 'fish') {
+            args.push('-i', '-l');
+          } else {
+            args.push(
+              baseLower === 'zsh' || baseLower === 'bash' || baseLower === 'sh' ? '-il' : '-i'
+            );
+          }
         }
       }
     } catch {}
@@ -1369,38 +1453,55 @@ export async function startPty(options: {
     }
   }
 
-  let proc: IPty;
-  try {
-    let spawnCommand: string;
-    let spawnArgs: string[];
-    let spawnCwd: string;
+  // When tmux is enabled, wrap the spawn in a tmux session.
+  // tmux new-session -As <name> creates or attaches to a named session.
+  // The inner shell command (with the agent CLI) runs inside tmux.
+  let tmuxSessionName: string | undefined;
+  let spawnCommand = useShell;
+  let spawnArgs = args;
 
-    if (wslConfig) {
-      // Route through wsl.exe — skip resolveWindowsPtySpawn (which wraps with cmd.exe).
-      if (args.length > 0) {
-        // Provider chain: wsl.exe -d <distro> --cd <posixCwd> -- bash <args>
-        spawnCommand = 'wsl.exe';
-        spawnArgs = [...wslConfig.args, '--', useShell, ...args];
-      } else {
-        // Plain shell: wsl.exe -d <distro> --cd <posixCwd>
-        spawnCommand = 'wsl.exe';
-        spawnArgs = [...wslConfig.args];
-      }
-      spawnCwd = wslConfig.cwd; // safe Windows-side cwd
-    } else {
-      const spawnSpec = resolveWindowsPtySpawn(useShell, args);
-      spawnCommand = spawnSpec.command;
-      spawnArgs = spawnSpec.args;
-      spawnCwd = useCwd;
+  if (tmux && process.platform !== 'win32') {
+    let tmuxAvailable = false;
+    try {
+      const { execFileSync } = require('child_process');
+      execFileSync('tmux', ['-V'], { timeout: 3000, stdio: 'ignore' });
+      tmuxAvailable = true;
+    } catch {
+      log.warn('ptyManager:tmux - tmux not found, falling back to unwrapped spawn', { id });
     }
 
-    proc = pty.spawn(spawnCommand, spawnArgs, {
-      name: 'xterm-256color',
-      cols,
-      rows,
-      cwd: spawnCwd,
-      env: useEnv,
-    });
+    if (tmuxAvailable) {
+      tmuxSessionName = getTmuxSessionName(id);
+      // Build: tmux new-session -As <name> -- <shell> <args...>
+      spawnCommand = 'tmux';
+      spawnArgs = ['new-session', '-As', tmuxSessionName, '--', useShell, ...args];
+      log.info('ptyManager:tmux - wrapping in tmux session', { id, tmuxSessionName });
+    }
+  }
+
+  let proc: IPty;
+  try {
+    if (wslConfig) {
+      // Route through wsl.exe — skip resolveWindowsPtySpawn (which wraps with cmd.exe).
+      const wslSpawnArgs =
+        args.length > 0 ? [...wslConfig.args, '--', useShell, ...args] : [...wslConfig.args];
+      proc = pty.spawn('wsl.exe', wslSpawnArgs, {
+        name: 'xterm-256color',
+        cols,
+        rows,
+        cwd: wslConfig.cwd,
+        env: useEnv,
+      });
+    } else {
+      const spawnSpec = resolveWindowsPtySpawn(spawnCommand, spawnArgs);
+      proc = pty.spawn(spawnSpec.command, spawnSpec.args, {
+        name: 'xterm-256color',
+        cols,
+        rows,
+        cwd: useCwd,
+        env: useEnv,
+      });
+    }
   } catch (err: any) {
     // Track initial spawn error
     const provider = args.find((arg) => PROVIDERS.some((p) => p.cli === arg));
@@ -1432,7 +1533,7 @@ export async function startPty(options: {
     }
   }
 
-  ptys.set(id, { id, proc, kind: 'local', cols, rows });
+  ptys.set(id, { id, proc, kind: 'local', cols, rows, tmuxSessionName });
   return proc;
 }
 
@@ -1505,4 +1606,8 @@ export function getPty(id: string): IPty | undefined {
 
 export function getPtyKind(id: string): 'local' | 'ssh' | undefined {
   return ptys.get(id)?.kind;
+}
+
+export function getPtyTmuxSessionName(id: string): string | undefined {
+  return ptys.get(id)?.tmuxSessionName;
 }
