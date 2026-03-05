@@ -290,6 +290,11 @@ declare global {
         };
         error?: string;
       }>;
+      lifecycleGetLogs: (args: { taskId: string }) => Promise<{
+        success: boolean;
+        logs?: { setup: string[]; run: string[]; teardown: string[] };
+        error?: string;
+      }>;
       lifecycleClearTask: (args: {
         taskId: string;
       }) => Promise<{ success: boolean; error?: string }>;
@@ -297,6 +302,15 @@ declare global {
 
       // Project management
       openProject: () => Promise<{
+        success: boolean;
+        path?: string;
+        error?: string;
+      }>;
+      openFile: (args?: {
+        title?: string;
+        message?: string;
+        filters?: Electron.FileFilter[];
+      }) => Promise<{
         success: boolean;
         path?: string;
         error?: string;
@@ -864,6 +878,27 @@ declare global {
         searchTerm: string,
         limit?: number
       ) => Promise<{ success: boolean; issues?: any[]; error?: string }>;
+      // GitLab
+      gitlabSaveCredentials?: (args: {
+        instanceUrl: string;
+        token: string;
+      }) => Promise<{ success: boolean; displayName?: string; error?: string }>;
+      gitlabClearCredentials?: () => Promise<{ success: boolean; error?: string }>;
+      gitlabCheckConnection?: () => Promise<{
+        success: boolean;
+        username?: string;
+        instanceUrl?: string;
+        error?: string;
+      }>;
+      gitlabInitialFetch?: (
+        projectPath: string,
+        limit?: number
+      ) => Promise<{ success: boolean; issues?: any[]; error?: string }>;
+      gitlabSearchIssues?: (
+        projectPath: string,
+        searchTerm: string,
+        limit?: number
+      ) => Promise<{ success: boolean; issues?: any[]; error?: string }>;
       getProviderStatuses?: (opts?: {
         refresh?: boolean;
         providers?: string[];
@@ -1307,11 +1342,25 @@ export interface ElectronAPI {
     };
     error?: string;
   }>;
+  lifecycleGetLogs: (args: { taskId: string }) => Promise<{
+    success: boolean;
+    logs?: { setup: string[]; run: string[]; teardown: string[] };
+    error?: string;
+  }>;
   lifecycleClearTask: (args: { taskId: string }) => Promise<{ success: boolean; error?: string }>;
   onLifecycleEvent: (listener: (data: any) => void) => () => void;
 
   // Project management
   openProject: () => Promise<{
+    success: boolean;
+    path?: string;
+    error?: string;
+  }>;
+  openFile: (args?: {
+    title?: string;
+    message?: string;
+    filters?: Electron.FileFilter[];
+  }) => Promise<{
     success: boolean;
     path?: string;
     error?: string;

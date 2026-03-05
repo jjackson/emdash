@@ -247,6 +247,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   lifecycleTeardown: (args: { taskId: string; taskPath: string; projectPath: string }) =>
     ipcRenderer.invoke('lifecycle:teardown', args),
   lifecycleGetState: (args: { taskId: string }) => ipcRenderer.invoke('lifecycle:getState', args),
+  lifecycleGetLogs: (args: { taskId: string }) => ipcRenderer.invoke('lifecycle:getLogs', args),
   lifecycleClearTask: (args: { taskId: string }) => ipcRenderer.invoke('lifecycle:clearTask', args),
   onLifecycleEvent: (listener: (data: any) => void) => {
     const wrapped = (_: Electron.IpcRendererEvent, data: any) => listener(data);
@@ -309,6 +310,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Project management
   openProject: () => ipcRenderer.invoke('project:open'),
+  openFile: (args?: { title?: string; message?: string; filters?: Electron.FileFilter[] }) =>
+    ipcRenderer.invoke('project:openFile', args),
   getProjectSettings: (projectId: string) =>
     ipcRenderer.invoke('projectSettings:get', { projectId }),
   updateProjectSettings: (args: { projectId: string; baseRef: string }) =>
@@ -494,6 +497,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   jiraInitialFetch: (limit?: number) => ipcRenderer.invoke('jira:initialFetch', limit),
   jiraSearchIssues: (searchTerm: string, limit?: number) =>
     ipcRenderer.invoke('jira:searchIssues', searchTerm, limit),
+  // GitLab integration
+  gitlabSaveCredentials: (args: { instanceUrl: string; token: string }) =>
+    ipcRenderer.invoke('gitlab:saveCredentials', args),
+  gitlabClearCredentials: () => ipcRenderer.invoke('gitlab:clearCredentials'),
+  gitlabCheckConnection: () => ipcRenderer.invoke('gitlab:checkConnection'),
+  gitlabInitialFetch: (projectPath: string, limit?: number) =>
+    ipcRenderer.invoke('gitlab:initialFetch', { projectPath, limit }),
+  gitlabSearchIssues: (projectPath: string, searchTerm: string, limit?: number) =>
+    ipcRenderer.invoke('gitlab:searchIssues', { projectPath, searchTerm, limit }),
   getProviderStatuses: (opts?: { refresh?: boolean; providers?: string[]; providerId?: string }) =>
     ipcRenderer.invoke('providers:getStatuses', opts ?? {}),
   getProviderCustomConfig: (providerId: string) =>
