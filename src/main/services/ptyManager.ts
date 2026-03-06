@@ -241,13 +241,25 @@ function loadSessionMap(): Record<string, SessionEntry> {
   return _sessionMap!;
 }
 
-/** Check if the session map has entries for other chats of the same provider in the same cwd. */
+/** Check if the session map has entries for other chats of the same provider in the same cwd.
+ *
+ * For main PTYs, only chat-PTY entries count as "other sessions". This prevents
+ * stale main-PTY entries from old non-worktree tasks (which share the same cwd)
+ * from falsely triggering the multi-chat transition path.
+ */
 function hasOtherSameProviderSessions(ptyId: string, providerId: string, cwd: string): boolean {
   const map = loadSessionMap();
-  const prefix = `${providerId}-`;
-  return Object.entries(map).some(
-    ([key, entry]) => key.startsWith(prefix) && key !== ptyId && entry.cwd === cwd
-  );
+  const isMainPty = ptyId.includes('-main-');
+  const chatPrefix = `${providerId}-chat-`;
+  const providerPrefix = `${providerId}-`;
+  return Object.entries(map).some(([key, entry]) => {
+    if (key === ptyId || entry.cwd !== cwd) return false;
+    if (!key.startsWith(providerPrefix)) return false;
+    // Main PTYs should only detect chat PTYs as "other sessions" — not other
+    // main PTYs from different tasks that happen to share the same working dir.
+    if (isMainPty) return key.startsWith(chatPrefix);
+    return true;
+  });
 }
 
 function markSessionCreated(ptyId: string, uuid: string, cwd: string): void {
@@ -260,13 +272,27 @@ function markSessionCreated(ptyId: string, uuid: string, cwd: string): void {
   }
 }
 
-function removeSessionId(ptyId: string): void {
+export function removeSessionId(ptyId: string): void {
   const map = loadSessionMap();
   delete map[ptyId];
   try {
     fs.writeFileSync(sessionMapPath(), JSON.stringify(map));
   } catch (e) {
     log.warn('ptyManager: failed to persist session map after removal', e);
+  }
+}
+
+/** Remove multiple session map entries at once (e.g. during task deletion). */
+export function removeSessionIds(ptyIds: string[]): void {
+  if (ptyIds.length === 0) return;
+  const map = loadSessionMap();
+  for (const id of ptyIds) {
+    delete map[id];
+  }
+  try {
+    fs.writeFileSync(sessionMapPath(), JSON.stringify(map));
+  } catch (e) {
+    log.warn('ptyManager: failed to persist session map after batch removal', e);
   }
 }
 

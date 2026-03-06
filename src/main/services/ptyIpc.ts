@@ -16,6 +16,7 @@ import {
   killTmuxSession,
   getTmuxSessionName,
   getPtyTmuxSessionName,
+  removeSessionIds,
 } from './ptyManager';
 import { log } from '../lib/logger';
 import { terminalSnapshotService } from './TerminalSnapshotService';
@@ -733,6 +734,17 @@ export function registerPtyIpc(): void {
       return { ok: true };
     } catch (e) {
       log.error('pty:killTmux error', { id: args.id, error: e });
+      return { ok: false, error: String(e) };
+    }
+  });
+
+  // Remove session map entries (used during task deletion to prevent stale sessions)
+  ipcMain.handle('pty:removeSessionMapEntries', async (_event, args: { ids: string[] }) => {
+    try {
+      removeSessionIds(args.ids);
+      return { ok: true };
+    } catch (e) {
+      log.error('pty:removeSessionMapEntries error', { error: e });
       return { ok: false, error: String(e) };
     }
   });

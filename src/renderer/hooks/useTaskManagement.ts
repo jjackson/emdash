@@ -468,6 +468,12 @@ export function useTaskManagement() {
         })
       );
 
+      // Clean up session map entries so stale sessions don't interfere with
+      // future non-worktree tasks that share the same working directory.
+      try {
+        await window.electronAPI.ptyRemoveSessionMapEntries(sessionIds);
+      } catch {}
+
       const variantPaths = (task.metadata?.multiAgent?.variants || []).map((v) => v.path);
       const pathsToClean = variantPaths.length > 0 ? variantPaths : [task.path];
       for (const path of pathsToClean) {
