@@ -2,15 +2,15 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { ArrowUpRight, AlertCircle, Archive, Pencil, Pin, PinOff, Trash2 } from 'lucide-react';
 import { useTaskChanges } from '../hooks/useTaskChanges';
 import { ChangesBadge } from './TaskChanges';
-
-import { Spinner } from './ui/spinner';
 import { usePrStatus } from '../hooks/usePrStatus';
 import { useTaskBusy } from '../hooks/useTaskBusy';
-import { useTaskIdleSince } from '../hooks/useTaskIdleSince';
-
 import PrPreviewTooltip from './PrPreviewTooltip';
+import { TaskStatusIndicator } from './TaskStatusIndicator';
 import TaskDeleteButton from './TaskDeleteButton';
+import { useTaskStatus } from '../hooks/useTaskStatus';
+import { useTaskUnread } from '../hooks/useTaskUnread';
 import { normalizeTaskName, MAX_TASK_NAME_LENGTH } from '../lib/taskNames';
+import { normalizeSqliteTimestamp } from '../lib/utils';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -24,7 +24,7 @@ function stopPropagation(e: React.MouseEvent): void {
 
 function formatCompactDate(dateStr?: string): string {
   if (!dateStr) return '';
-  const date = new Date(dateStr);
+  const date = new Date(normalizeSqliteTimestamp(dateStr));
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   if (diffMs < 0) return '';
@@ -38,18 +38,6 @@ function formatCompactDate(dateStr?: string): string {
   const diffMonths = Math.floor(diffDays / 30);
   if (diffMonths < 12) return `${diffMonths}mo`;
   return `${Math.floor(diffDays / 365)}y`;
-}
-
-function formatTimeSince(timestamp: number): string {
-  const diffMs = Date.now() - timestamp;
-  if (diffMs < 0) return '';
-  const diffMin = Math.floor(diffMs / 60000);
-  if (diffMin < 1) return 'just now';
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const diffHrs = Math.floor(diffMin / 60);
-  if (diffHrs < 24) return `${diffHrs}h ago`;
-  const diffDays = Math.floor(diffHrs / 24);
-  return `${diffDays}d ago`;
 }
 
 interface Task {
@@ -88,8 +76,10 @@ export const TaskItem: React.FC<TaskItemProps> = ({
 }) => {
   const { totalAdditions, totalDeletions, isLoading } = useTaskChanges(task.path, task.id);
   const { pr } = usePrStatus(task.path);
-  const isRunning = useTaskBusy(task.id);
-  const idleSince = useTaskIdleSince(task.id, isRunning);
+  const isBusy = useTaskBusy(task.id);
+  const taskStatus = useTaskStatus(task.id);
+  const taskUnread = useTaskUnread(task.id);
+  const displayStatus = taskStatus === 'unknown' && isBusy ? 'working' : taskStatus;
 
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -197,38 +187,47 @@ export const TaskItem: React.FC<TaskItemProps> = ({
   const taskContent = (
     <div className="flex min-w-0 items-center gap-1.5">
       {/* Left icon slot — same width as the project folder icon */}
-      <div className="flex w-5 flex-shrink-0 items-center justify-center">
+      <div className="relative flex w-5 flex-shrink-0 items-center justify-center">
+        <div
+          className={`absolute inset-0 flex items-center justify-center transition-opacity ${showDelete && (onDelete || onArchive) && !isDeleting ? 'group-hover/task:opacity-0' : ''}`}
+        >
+          <TaskStatusIndicator status={displayStatus} unread={taskUnread} />
+        </div>
         {showDelete && onDelete && primaryAction === 'delete' ? (
-          <TaskDeleteButton
-            taskName={task.name}
-            taskId={task.id}
-            taskPath={task.path}
-            useWorktree={task.useWorktree}
-            onConfirm={async () => {
-              try {
-                setIsDeleting(true);
-                await onDelete();
-              } finally {
-                setIsDeleting(false);
-              }
-            }}
-            isDeleting={isDeleting}
-            aria-label={`Delete Task ${task.name}`}
-            className={`!h-5 !w-5 text-muted-foreground ${isDeleting ? '' : 'opacity-0 group-hover/task:opacity-100'}`}
-          />
+          <div className="absolute inset-0 flex items-center justify-center">
+            <TaskDeleteButton
+              taskName={task.name}
+              taskId={task.id}
+              taskPath={task.path}
+              useWorktree={task.useWorktree}
+              onConfirm={async () => {
+                try {
+                  setIsDeleting(true);
+                  await onDelete();
+                } finally {
+                  setIsDeleting(false);
+                }
+              }}
+              isDeleting={isDeleting}
+              aria-label={`Delete Task ${task.name}`}
+              className={`!h-5 !w-5 text-muted-foreground ${isDeleting ? '' : 'opacity-0 group-hover/task:opacity-100'}`}
+            />
+          </div>
         ) : showDelete && onArchive && primaryAction === 'archive' ? (
           <>
-            <button
-              type="button"
-              className={`rounded p-0.5 text-muted-foreground hover:text-foreground ${isDeleting ? 'opacity-100' : 'opacity-0 group-hover/task:opacity-100'}`}
-              aria-label={`Archive Task ${task.name}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                onArchive();
-              }}
-            >
-              <Archive className="h-4 w-4" />
-            </button>
+            <div className="absolute inset-0 flex items-center justify-center">
+              <button
+                type="button"
+                className={`rounded p-0.5 text-muted-foreground hover:text-foreground ${isDeleting ? 'opacity-100' : 'opacity-0 group-hover/task:opacity-100'}`}
+                aria-label={`Archive Task ${task.name}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onArchive();
+                }}
+              >
+                <Archive className="h-4 w-4" />
+              </button>
+            </div>
             {onDelete && (
               <TaskDeleteButton
                 taskName={task.name}
@@ -253,9 +252,6 @@ export const TaskItem: React.FC<TaskItemProps> = ({
         ) : null}
       </div>
       <div className="flex min-w-0 flex-1 items-center gap-1.5">
-        {(isRunning || task.status === 'running') && (
-          <Spinner size="sm" className="h-3 w-3 flex-shrink-0 text-muted-foreground" />
-        )}
         {isEditing ? (
           <input
             ref={inputRef}
@@ -290,11 +286,6 @@ export const TaskItem: React.FC<TaskItemProps> = ({
               />
             )}
             <span className="block truncate text-sm font-medium text-foreground">{task.name}</span>
-            {idleSince !== null && (
-              <span className="flex-shrink-0 text-[11px] text-muted-foreground">
-                ({formatTimeSince(idleSince)})
-              </span>
-            )}
           </>
         )}
         {showDirectBadge && task.useWorktree === false && (

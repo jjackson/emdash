@@ -12,11 +12,14 @@ import {
   setOnDirectCliExit,
   parseShellArgs,
   buildProviderCliArgs,
+  getProviderRuntimeCliArgs,
   resolveProviderCommandConfig,
   killTmuxSession,
   getTmuxSessionName,
   getPtyTmuxSessionName,
-  removeSessionIds,
+  clearStoredSession,
+  getStoredResumeTarget,
+  markCodexSessionBound,
 } from './ptyManager';
 import { log } from '../lib/logger';
 import { terminalSnapshotService } from './TerminalSnapshotService';
@@ -30,6 +33,7 @@ import { ClaudeHookService } from './ClaudeHookService';
 import { databaseService } from './DatabaseService';
 import { lifecycleScriptsService } from './LifecycleScriptsService';
 import { maybeAutoTrustForClaude } from './ClaudeConfigService';
+import { OpenCodeHookService, OPEN_CODE_PLUGIN_FILE } from './OpenCodeHookService';
 import { getDrizzleClient } from '../db/drizzleClient';
 import { sshConnections as sshConnectionsTable } from '../db/schema';
 import { eq } from 'drizzle-orm';
@@ -38,9 +42,49 @@ import { createHash, randomUUID } from 'crypto';
 import path from 'path';
 import { quoteShellArg } from '../utils/shellEscape';
 import { agentEventService } from './AgentEventService';
+import { codexSessionService } from './CodexSessionService';
+import { waitForShellPrompt, type PromptWaitHandle } from '../utils/waitForShellPrompt';
 
 const owners = new Map<string, WebContents>();
 const listeners = new Set<string>();
+const promptHandles = new Map<string, PromptWaitHandle[]>();
+
+function cancelPromptHandles(id: string): void {
+  const handles = promptHandles.get(id);
+  if (handles) {
+    for (const h of handles) h.cancel();
+    promptHandles.delete(id);
+  }
+}
+
+function waitForSshPromptThenWrite(
+  id: string,
+  proc: {
+    onData: (cb: (data: string) => void) => { dispose: () => void };
+    write: (data: string) => void;
+  },
+  data: string,
+  label: string
+): void {
+  const handles = promptHandles.get(id) ?? [];
+  promptHandles.set(id, handles);
+
+  const handle = waitForShellPrompt({
+    subscribe: (cb) => {
+      const disposable = proc.onData(cb);
+      return () => disposable.dispose();
+    },
+    write: (d) => {
+      proc.write(d);
+      promptHandles.delete(id);
+    },
+    data,
+    onTimeout: () =>
+      log.warn(`${label} SSH shell prompt not detected, writing init commands anyway`, { id }),
+  });
+  handles.push(handle);
+}
+
 const providerPtyTimers = new Map<string, number>();
 // Map PTY IDs to provider IDs for multi-agent tracking
 const ptyProviderMap = new Map<string, ProviderId>();
@@ -56,6 +100,145 @@ type FinishCause = 'process_exit' | 'app_quit' | 'owner_destroyed' | 'manual_kil
 const ptyDataBuffers = new Map<string, string>();
 const ptyDataTimers = new Map<string, NodeJS.Timeout>();
 const PTY_DATA_FLUSH_MS = 16;
+const CODEX_BIND_LOOKBACK_MS = 15_000;
+const CODEX_BIND_TIMEOUT_MS = 20_000;
+const CODEX_BIND_POLL_MS = 250;
+const codexBindingQueues = new Map<string, Promise<void>>();
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function pruneInvalidCodexResumeTarget(
+  ptyId: string,
+  cwd: string,
+  resume?: boolean
+): Promise<void> {
+  if (!resume) return;
+
+  const exactTarget = getStoredResumeTarget(ptyId, 'codex', cwd);
+  if (!exactTarget) return;
+
+  const valid = await codexSessionService.threadExistsForCwd(exactTarget, cwd);
+  if (valid) return;
+
+  clearStoredSession(ptyId);
+  log.warn('ptyIpc: pruned stale Codex resume target', { ptyId, cwd, exactTarget });
+}
+
+async function bindCodexThreadForPty(ptyId: string, cwd: string, startedAt: number): Promise<void> {
+  if (getStoredResumeTarget(ptyId, 'codex', cwd)) {
+    log.info('ptyIpc: skipping Codex bind because PTY already has a stored target', {
+      ptyId,
+      cwd,
+    });
+    return;
+  }
+
+  const deadline = Date.now() + CODEX_BIND_TIMEOUT_MS;
+  const since = startedAt - CODEX_BIND_LOOKBACK_MS;
+  let attempts = 0;
+
+  log.info('ptyIpc: starting Codex thread bind', {
+    ptyId,
+    cwd,
+    startedAt,
+    since,
+    timeoutMs: CODEX_BIND_TIMEOUT_MS,
+    lookbackMs: CODEX_BIND_LOOKBACK_MS,
+  });
+
+  const existingThread = await codexSessionService.findLatestThreadForCwd(cwd);
+  if (existingThread) {
+    markCodexSessionBound(ptyId, existingThread.id, cwd);
+    log.info('ptyIpc: bound Codex PTY to existing exact-cwd thread', {
+      ptyId,
+      cwd,
+      threadId: existingThread.id,
+      updatedAt: existingThread.updatedAt,
+    });
+    return;
+  }
+
+  while (Date.now() <= deadline) {
+    attempts += 1;
+    const thread = await codexSessionService.findLatestRecentThreadForCwd(cwd, since);
+    if (thread || attempts <= 3 || attempts % 10 === 0) {
+      log.info('ptyIpc: Codex bind poll result', {
+        ptyId,
+        cwd,
+        attempt: attempts,
+        candidateThreadId: thread?.id ?? null,
+        candidateUpdatedAt: thread?.updatedAt ?? null,
+      });
+    }
+    if (thread) {
+      markCodexSessionBound(ptyId, thread.id, cwd);
+      log.info('ptyIpc: bound Codex PTY to thread', { ptyId, cwd, threadId: thread.id });
+      return;
+    }
+    await sleep(CODEX_BIND_POLL_MS);
+  }
+
+  const latestThread = await codexSessionService.findLatestThreadForCwd(cwd);
+  if (latestThread) {
+    markCodexSessionBound(ptyId, latestThread.id, cwd);
+    log.info('ptyIpc: bound Codex PTY to latest exact-cwd thread after polling timeout', {
+      ptyId,
+      cwd,
+      attempts,
+      threadId: latestThread.id,
+      updatedAt: latestThread.updatedAt,
+    });
+    return;
+  }
+
+  log.info('ptyIpc: no Codex thread discovered for PTY', {
+    ptyId,
+    cwd,
+    attempts,
+    latestThreadId: null,
+    latestThreadUpdatedAt: null,
+    latestThreadCreatedAt: null,
+    latestThreadArchived: null,
+  });
+}
+
+function scheduleCodexThreadBinding(ptyId: string, cwd: string, startedAt: number): void {
+  if (getStoredResumeTarget(ptyId, 'codex', cwd)) {
+    log.info('ptyIpc: not scheduling Codex bind because exact target already exists', {
+      ptyId,
+      cwd,
+    });
+    return;
+  }
+
+  const queueKey = `codex:${cwd}`;
+  const previous = codexBindingQueues.get(queueKey) ?? Promise.resolve();
+  log.info('ptyIpc: scheduling Codex bind', {
+    ptyId,
+    cwd,
+    queueKey,
+    queuedBehindExistingBind: codexBindingQueues.has(queueKey),
+  });
+  const next = previous
+    .catch(() => {})
+    .then(() => bindCodexThreadForPty(ptyId, cwd, startedAt))
+    .catch((error) => {
+      log.warn('ptyIpc: failed to bind Codex thread', {
+        ptyId,
+        cwd,
+        error: String(error),
+      });
+    })
+    .finally(() => {
+      if (codexBindingQueues.get(queueKey) === next) {
+        codexBindingQueues.delete(queueKey);
+      }
+    });
+
+  codexBindingQueues.set(queueKey, next);
+}
 
 // Guard IPC sends to prevent crashes when WebContents is destroyed
 function safeSendToOwner(id: string, channel: string, payload: unknown): boolean {
@@ -89,6 +272,18 @@ function clearPtyData(id: string): void {
     ptyDataTimers.delete(id);
   }
   ptyDataBuffers.delete(id);
+}
+
+function cleanupPtySession(id: string): void {
+  // Ensure telemetry timers are cleared even on manual kill
+  maybeMarkProviderFinish(id, null, undefined, 'manual_kill');
+  // Kill associated tmux session if this PTY was tmux-wrapped
+  if (getPtyTmuxSessionName(id)) {
+    killTmuxSession(id);
+  }
+  killPty(id);
+  owners.delete(id);
+  listeners.delete(id);
 }
 
 function bufferedSendPtyData(id: string, chunk: string): void {
@@ -154,6 +349,25 @@ async function writeRemoteHookConfig(
   ]);
 }
 
+async function writeRemoteOpenCodePlugin(
+  sshArgs: string[],
+  sshTarget: string,
+  ptyId: string
+): Promise<string> {
+  const configDir = OpenCodeHookService.getRemoteConfigDir(ptyId);
+  const pluginsDir = `${configDir}/plugins`;
+  const pluginPath = `${pluginsDir}/${OPEN_CODE_PLUGIN_FILE}`;
+  const pluginSource = OpenCodeHookService.getPluginSource();
+
+  await execFileAsync('ssh', [
+    ...sshArgs,
+    sshTarget,
+    `mkdir -p "${pluginsDir}" && printf '%s\\n' ${quoteShellArg(pluginSource)} > "${pluginPath}"`,
+  ]);
+
+  return configDir;
+}
+
 function buildRemoteInitKeystrokes(args: {
   cwd?: string;
   provider?: { cli: string; cmd: string; installCommand?: string };
@@ -186,12 +400,12 @@ function buildRemoteInitKeystrokes(args: {
       const shScript = `if command -v ${quoteShellArg(cli)} >/dev/null 2>&1; then if command -v tmux >/dev/null 2>&1; then exec tmux new-session -As ${tmuxName} -- sh -c ${quoteShellArg(providerCmd)}; else printf '%s\\n' 'emdash: tmux not found on remote, running without session persistence'; exec ${providerCmd}; fi; else printf '%s\\n' ${quoteShellArg(
         msg
       )}; fi`;
-      lines.push(`sh -c ${quoteShellArg(shScript)}`);
+      lines.push(`sh -ilc ${quoteShellArg(shScript)}`);
     } else {
       const shScript = `if command -v ${quoteShellArg(cli)} >/dev/null 2>&1; then exec ${providerCmd}; else printf '%s\\n' ${quoteShellArg(
         msg
       )}; fi`;
-      lines.push(`sh -c ${quoteShellArg(shScript)}`);
+      lines.push(`sh -ilc ${quoteShellArg(shScript)}`);
     }
   }
 
@@ -280,6 +494,7 @@ function buildRemoteProviderInvocation(args: {
     initialPromptFlag: resolvedConfig?.initialPromptFlag ?? fallbackProvider?.initialPromptFlag,
     useKeystrokeInjection: provider?.useKeystrokeInjection,
   });
+  cliArgs.push(...getProviderRuntimeCliArgs({ providerId, target: 'remote' }));
 
   const cmdParts = [...cliCommandParts, ...cliArgs];
   const cmd = cmdParts.map(quoteShellArg).join(' ');
@@ -448,6 +663,7 @@ export function registerPtyIpc(): void {
               bufferedSendPtyData(id, data);
             });
             proc.onExit(({ exitCode, signal }) => {
+              cancelPromptHandles(id);
               flushPtyData(id);
               clearPtyData(id);
               safeSendToOwner(id, `pty:exit:${id}`, { exitCode, signal });
@@ -464,7 +680,7 @@ export function registerPtyIpc(): void {
 
           const remoteInit = buildRemoteInitKeystrokes({ cwd, tmux: remoteTmuxOpt });
           if (remoteInit) {
-            proc.write(remoteInit);
+            waitForSshPromptThenWrite(id, proc, remoteInit, 'ptyIpc:start');
           }
 
           try {
@@ -713,19 +929,61 @@ export function registerPtyIpc(): void {
 
   ipcMain.on('pty:kill', (_event, args: { id: string }) => {
     try {
-      // Ensure telemetry timers are cleared even on manual kill
-      maybeMarkProviderFinish(args.id, null, undefined, 'manual_kill');
-      // Kill associated tmux session if this PTY was tmux-wrapped
-      if (getPtyTmuxSessionName(args.id)) {
-        killTmuxSession(args.id);
-      }
-      killPty(args.id);
-      owners.delete(args.id);
-      listeners.delete(args.id);
+      cleanupPtySession(args.id);
     } catch (e) {
       log.error('pty:kill error', { id: args.id, error: e });
     }
   });
+
+  ipcMain.handle(
+    'pty:cleanupSessions',
+    async (
+      _event,
+      args: { ids: string[]; clearSnapshots?: boolean; waitForSnapshots?: boolean }
+    ): Promise<{
+      ok: boolean;
+      cleaned: number;
+      failedIds: string[];
+      snapshotClearQueued: boolean;
+    }> => {
+      const ids = Array.from(new Set((args?.ids || []).filter(Boolean)));
+      const failedIds: string[] = [];
+
+      for (const id of ids) {
+        try {
+          cleanupPtySession(id);
+        } catch (error) {
+          failedIds.push(id);
+          log.error('pty:cleanupSessions kill error', { id, error });
+        }
+      }
+
+      const clearSnapshots = args?.clearSnapshots === true;
+      const waitForSnapshots = args?.waitForSnapshots === true;
+      if (clearSnapshots) {
+        const clearPromise = Promise.allSettled(
+          ids.map(async (id) => {
+            try {
+              await terminalSnapshotService.deleteSnapshot(id);
+            } catch {}
+          })
+        );
+
+        if (waitForSnapshots) {
+          await clearPromise;
+        } else {
+          void clearPromise;
+        }
+      }
+
+      return {
+        ok: failedIds.length === 0,
+        cleaned: ids.length - failedIds.length,
+        failedIds,
+        snapshotClearQueued: clearSnapshots,
+      };
+    }
+  );
 
   // Kill a tmux session by PTY ID (used during task deletion cleanup)
   ipcMain.handle('pty:killTmux', async (_event, args: { id: string }) => {
@@ -741,7 +999,7 @@ export function registerPtyIpc(): void {
   // Remove session map entries (used during task deletion to prevent stale sessions)
   ipcMain.handle('pty:removeSessionMapEntries', async (_event, args: { ids: string[] }) => {
     try {
-      removeSessionIds(args.ids);
+      for (const id of args.ids) clearStoredSession(id);
       return { ok: true };
     } catch (e) {
       log.error('pty:removeSessionMapEntries error', { error: e });
@@ -879,10 +1137,22 @@ export function registerPtyIpc(): void {
           const resolvedConfig = resolveProviderCommandConfig(providerId);
           const mergedEnv = resolvedConfig?.env ? { ...resolvedConfig.env, ...env } : env;
 
+          const preProviderCommands: string[] = [];
+          if (providerId === 'opencode') {
+            try {
+              const remoteConfigDir = await writeRemoteOpenCodePlugin(ssh.args, ssh.target, id);
+              preProviderCommands.push(`export OPENCODE_CONFIG_DIR="${remoteConfigDir}"`);
+            } catch (err: any) {
+              log.warn('ptyIpc:startDirect failed to write remote OpenCode plugin', {
+                id,
+                error: err?.message || String(err),
+              });
+            }
+          }
+
           // Set up reverse SSH tunnel for hook events if the local hook
           // server is running. This lets the remote agent call back to
           // the local AgentEventService via the tunnel.
-          const preProviderCommands: string[] = [];
           const hookPort = agentEventService.getPort();
           if (hookPort > 0) {
             const remotePort = pickReverseTunnelPort(id);
@@ -926,6 +1196,7 @@ export function registerPtyIpc(): void {
               bufferedSendPtyData(id, data);
             });
             proc.onExit(({ exitCode, signal }) => {
+              cancelPromptHandles(id);
               flushPtyData(id);
               clearPtyData(id);
               safeSendToOwner(id, `pty:exit:${id}`, { exitCode, signal });
@@ -948,7 +1219,7 @@ export function registerPtyIpc(): void {
             preProviderCommands: preProviderCommands.length ? preProviderCommands : undefined,
           });
           if (remoteInit) {
-            proc.write(remoteInit);
+            waitForSshPromptThenWrite(id, proc, remoteInit, 'ptyIpc:startDirect');
           }
 
           maybeMarkProviderStart(id);
@@ -978,10 +1249,15 @@ export function registerPtyIpc(): void {
           }
         }
 
+        if (providerId === 'codex') {
+          await pruneInvalidCodexResumeTarget(id, cwd, effectiveResume);
+        }
+
         maybeAutoTrustForClaude(providerId, cwd);
 
         const shellSetup = await resolveShellSetup(cwd);
         const tmux = await resolveTmuxEnabled(cwd);
+        const codexBindingStartedAt = providerId === 'codex' ? Date.now() : 0;
 
         // Write Claude Code hook config so it calls back to Emdash on events
         if (providerId === 'claude') {
@@ -1099,6 +1375,10 @@ export function registerPtyIpc(): void {
         }
 
         maybeMarkProviderStart(id, providerId as ProviderId);
+
+        if (providerId === 'codex') {
+          scheduleCodexThreadBinding(id, cwd, codexBindingStartedAt);
+        }
 
         try {
           const windows = BrowserWindow.getAllWindows();

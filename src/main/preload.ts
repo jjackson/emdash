@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { TerminalSnapshotPayload } from './types/terminalSnapshot';
 import type { OpenInAppId } from '../shared/openInApps';
 import type { AgentEvent } from '../shared/agentEvents';
+import type { McpServer } from '../shared/mcp/types';
 
 // Keep preload self-contained: sandboxed preload cannot reliably require local runtime modules.
 const LIFECYCLE_EVENT_CHANNEL = 'lifecycle:event';
@@ -129,6 +130,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ptySaveSnapshot: (args: { id: string; payload: TerminalSnapshotPayload }) =>
     ipcRenderer.invoke('pty:snapshot:save', args),
   ptyClearSnapshot: (args: { id: string }) => ipcRenderer.invoke('pty:snapshot:clear', args),
+  ptyCleanupSessions: (args: {
+    ids: string[];
+    clearSnapshots?: boolean;
+    waitForSnapshots?: boolean;
+  }) => ipcRenderer.invoke('pty:cleanupSessions', args),
   onPtyExit: (id: string, listener: (info: { exitCode: number; signal?: number }) => void) => {
     const channel = `pty:exit:${id}`;
     const wrapped = (_: Electron.IpcRendererEvent, info: { exitCode: number; signal?: number }) =>
@@ -325,6 +331,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('projectSettings:fetchBaseRef', args),
   getGitInfo: (projectPath: string) => ipcRenderer.invoke('git:getInfo', projectPath),
   getGitStatus: (taskPath: string) => ipcRenderer.invoke('git:get-status', taskPath),
+  getDeleteRisks: (args: {
+    targets: Array<{ id: string; taskPath: string }>;
+    includePr?: boolean;
+  }) => ipcRenderer.invoke('git:get-delete-risks', args),
   watchGitStatus: (taskPath: string) => ipcRenderer.invoke('git:watch-status', taskPath),
   unwatchGitStatus: (taskPath: string, watchId?: string) =>
     ipcRenderer.invoke('git:unwatch-status', taskPath, watchId),
@@ -383,6 +393,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     admin?: boolean;
   }) => ipcRenderer.invoke('git:merge-pr', args),
   getPrStatus: (args: { taskPath: string }) => ipcRenderer.invoke('git:get-pr-status', args),
+  enableAutoMerge: (args: {
+    taskPath: string;
+    prNumber?: number;
+    strategy?: 'merge' | 'squash' | 'rebase';
+  }) => ipcRenderer.invoke('git:enable-auto-merge', args),
+  disableAutoMerge: (args: { taskPath: string; prNumber?: number }) =>
+    ipcRenderer.invoke('git:disable-auto-merge', args),
   getCheckRuns: (args: { taskPath: string }) => ipcRenderer.invoke('git:get-check-runs', args),
   getPrComments: (args: { taskPath: string; prNumber?: number }) =>
     ipcRenderer.invoke('git:get-pr-comments', args),
@@ -511,6 +528,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('gitlab:initialFetch', { projectPath, limit }),
   gitlabSearchIssues: (projectPath: string, searchTerm: string, limit?: number) =>
     ipcRenderer.invoke('gitlab:searchIssues', { projectPath, searchTerm, limit }),
+  // Plain integration
+  plainSaveToken: (token: string) => ipcRenderer.invoke('plain:saveToken', token),
+  plainCheckConnection: () => ipcRenderer.invoke('plain:checkConnection'),
+  plainClearToken: () => ipcRenderer.invoke('plain:clearToken'),
+  plainInitialFetch: (limit?: number, statuses?: string[]) =>
+    ipcRenderer.invoke('plain:initialFetch', limit, statuses),
+  plainSearchThreads: (searchTerm: string, limit?: number) =>
+    ipcRenderer.invoke('plain:searchThreads', searchTerm, limit),
   getProviderStatuses: (opts?: { refresh?: boolean; providers?: string[]; providerId?: string }) =>
     ipcRenderer.invoke('providers:getStatuses', opts ?? {}),
   getProviderCustomConfig: (providerId: string) =>
@@ -712,6 +737,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   skillsGetDetectedAgents: () => ipcRenderer.invoke('skills:getDetectedAgents'),
   skillsCreate: (args: { name: string; description: string }) =>
     ipcRenderer.invoke('skills:create', args),
+
+  // MCP
+  mcpLoadAll: () => ipcRenderer.invoke('mcp:load-all'),
+  mcpSaveServer: (server: McpServer) => ipcRenderer.invoke('mcp:save-server', server),
+  mcpRemoveServer: (serverName: string) => ipcRenderer.invoke('mcp:remove-server', serverName),
+  mcpGetProviders: () => ipcRenderer.invoke('mcp:get-providers'),
+  mcpRefreshProviders: () => ipcRenderer.invoke('mcp:refresh-providers'),
 });
 
 // Type definitions for the exposed API
@@ -775,6 +807,16 @@ export interface ElectronAPI {
     payload: TerminalSnapshotPayload;
   }) => Promise<{ ok: boolean; error?: string }>;
   ptyClearSnapshot: (args: { id: string }) => Promise<{ ok: boolean }>;
+  ptyCleanupSessions: (args: {
+    ids: string[];
+    clearSnapshots?: boolean;
+    waitForSnapshots?: boolean;
+  }) => Promise<{
+    ok: boolean;
+    cleaned: number;
+    failedIds: string[];
+    snapshotClearQueued: boolean;
+  }>;
   onPtyExit: (
     id: string,
     listener: (info: { exitCode: number; signal?: number }) => void
@@ -929,6 +971,32 @@ export interface ElectronAPI {
       deletions: number;
       diff?: string;
     }>;
+    error?: string;
+  }>;
+  getDeleteRisks: (args: {
+    targets: Array<{ id: string; taskPath: string }>;
+    includePr?: boolean;
+  }) => Promise<{
+    success: boolean;
+    risks?: Record<
+      string,
+      {
+        staged: number;
+        unstaged: number;
+        untracked: number;
+        ahead: number;
+        behind: number;
+        error?: string;
+        pr?: {
+          number?: number;
+          title?: string;
+          url?: string;
+          state?: string | null;
+          isDraft?: boolean;
+        } | null;
+        prKnown: boolean;
+      }
+    >;
     error?: string;
   }>;
   watchGitStatus: (taskPath: string) => Promise<{

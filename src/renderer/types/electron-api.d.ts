@@ -1,6 +1,7 @@
 // Updated for Codex integration
 
 import type { AgentEvent } from '../../shared/agentEvents';
+import type { AutoMergeRequest } from '../lib/prStatus';
 
 type ProjectSettingsPayload = {
   projectId: string;
@@ -115,6 +116,16 @@ declare global {
         error?: string;
       }>;
       ptyClearSnapshot: (args: { id: string }) => Promise<{ ok: boolean }>;
+      ptyCleanupSessions: (args: {
+        ids: string[];
+        clearSnapshots?: boolean;
+        waitForSnapshots?: boolean;
+      }) => Promise<{
+        ok: boolean;
+        cleaned: number;
+        failedIds: string[];
+        snapshotClearQueued: boolean;
+      }>;
       onPtyExit: (
         id: string,
         listener: (info: { exitCode: number; signal?: number }) => void
@@ -350,6 +361,32 @@ declare global {
         }>;
         error?: string;
       }>;
+      getDeleteRisks: (args: {
+        targets: Array<{ id: string; taskPath: string }>;
+        includePr?: boolean;
+      }) => Promise<{
+        success: boolean;
+        risks?: Record<
+          string,
+          {
+            staged: number;
+            unstaged: number;
+            untracked: number;
+            ahead: number;
+            behind: number;
+            error?: string;
+            pr?: {
+              number?: number;
+              title?: string;
+              url?: string;
+              state?: string | null;
+              isDraft?: boolean;
+            } | null;
+            prKnown: boolean;
+          }
+        >;
+        error?: string;
+      }>;
       watchGitStatus: (taskPath: string) => Promise<{
         success: boolean;
         watchId?: string;
@@ -423,6 +460,7 @@ declare global {
           subject: string;
           body: string;
           author: string;
+          authorEmail: string;
           date: string;
           isPushed: boolean;
           tags: string[];
@@ -534,7 +572,22 @@ declare global {
           additions?: number;
           deletions?: number;
           changedFiles?: number;
+          autoMergeRequest?: AutoMergeRequest | null;
         } | null;
+        error?: string;
+      }>;
+      enableAutoMerge: (args: {
+        taskPath: string;
+        prNumber?: number;
+        strategy?: 'merge' | 'squash' | 'rebase';
+      }) => Promise<{
+        success: boolean;
+        output?: string;
+        error?: string;
+      }>;
+      disableAutoMerge: (args: { taskPath: string; prNumber?: number }) => Promise<{
+        success: boolean;
+        output?: string;
         error?: string;
       }>;
       getCheckRuns: (args: { taskPath: string }) => Promise<{
@@ -900,6 +953,37 @@ declare global {
         searchTerm: string,
         limit?: number
       ) => Promise<{ success: boolean; issues?: any[]; error?: string }>;
+      // Plain integration
+      plainSaveToken?: (token: string) => Promise<{
+        success: boolean;
+        workspaceName?: string;
+        error?: string;
+      }>;
+      plainCheckConnection?: () => Promise<{
+        connected: boolean;
+        workspaceName?: string;
+        error?: string;
+      }>;
+      plainClearToken?: () => Promise<{
+        success: boolean;
+        error?: string;
+      }>;
+      plainInitialFetch?: (
+        limit?: number,
+        statuses?: string[]
+      ) => Promise<{
+        success: boolean;
+        threads?: any[];
+        error?: string;
+      }>;
+      plainSearchThreads?: (
+        searchTerm: string,
+        limit?: number
+      ) => Promise<{
+        success: boolean;
+        threads?: any[];
+        error?: string;
+      }>;
       getProviderStatuses?: (opts?: {
         refresh?: boolean;
         providers?: string[];
@@ -1122,6 +1206,31 @@ declare global {
         data?: import('@shared/skills/types').CatalogSkill;
         error?: string;
       }>;
+
+      // MCP
+      mcpLoadAll: () => Promise<{
+        success: boolean;
+        data?: import('../../shared/mcp/types').McpLoadAllResponse;
+        error?: string;
+      }>;
+      mcpSaveServer: (server: import('../../shared/mcp/types').McpServer) => Promise<{
+        success: boolean;
+        error?: string;
+      }>;
+      mcpRemoveServer: (serverName: string) => Promise<{
+        success: boolean;
+        error?: string;
+      }>;
+      mcpGetProviders: () => Promise<{
+        success: boolean;
+        data?: import('../../shared/mcp/types').McpProvidersResponse[];
+        error?: string;
+      }>;
+      mcpRefreshProviders: () => Promise<{
+        success: boolean;
+        data?: import('../../shared/mcp/types').McpProvidersResponse[];
+        error?: string;
+      }>;
     };
   }
 }
@@ -1199,6 +1308,16 @@ export interface ElectronAPI {
     error?: string;
   }>;
   ptyClearSnapshot: (args: { id: string }) => Promise<{ ok: boolean }>;
+  ptyCleanupSessions: (args: {
+    ids: string[];
+    clearSnapshots?: boolean;
+    waitForSnapshots?: boolean;
+  }) => Promise<{
+    ok: boolean;
+    cleaned: number;
+    failedIds: string[];
+    snapshotClearQueued: boolean;
+  }>;
   onPtyExit: (
     id: string,
     listener: (info: { exitCode: number; signal?: number }) => void
@@ -1620,6 +1739,38 @@ export interface ElectronAPI {
     error?: string;
   }>;
 
+  // Plain integration
+  plainSaveToken?: (token: string) => Promise<{
+    success: boolean;
+    workspaceName?: string;
+    error?: string;
+  }>;
+  plainCheckConnection?: () => Promise<{
+    connected: boolean;
+    workspaceName?: string;
+    error?: string;
+  }>;
+  plainClearToken?: () => Promise<{
+    success: boolean;
+    error?: string;
+  }>;
+  plainInitialFetch?: (
+    limit?: number,
+    statuses?: string[]
+  ) => Promise<{
+    success: boolean;
+    threads?: any[];
+    error?: string;
+  }>;
+  plainSearchThreads?: (
+    searchTerm: string,
+    limit?: number
+  ) => Promise<{
+    success: boolean;
+    threads?: any[];
+    error?: string;
+  }>;
+
   // Debug helpers
   debugAppendLog: (
     filePath: string,
@@ -1700,6 +1851,31 @@ export interface ElectronAPI {
   skillsCreate: (args: { name: string; description: string }) => Promise<{
     success: boolean;
     data?: import('@shared/skills/types').CatalogSkill;
+    error?: string;
+  }>;
+
+  // MCP
+  mcpLoadAll: () => Promise<{
+    success: boolean;
+    data?: import('../../shared/mcp/types').McpLoadAllResponse;
+    error?: string;
+  }>;
+  mcpSaveServer: (server: import('../../shared/mcp/types').McpServer) => Promise<{
+    success: boolean;
+    error?: string;
+  }>;
+  mcpRemoveServer: (serverName: string) => Promise<{
+    success: boolean;
+    error?: string;
+  }>;
+  mcpGetProviders: () => Promise<{
+    success: boolean;
+    data?: import('../../shared/mcp/types').McpProvidersResponse[];
+    error?: string;
+  }>;
+  mcpRefreshProviders: () => Promise<{
+    success: boolean;
+    data?: import('../../shared/mcp/types').McpProvidersResponse[];
     error?: string;
   }>;
 }

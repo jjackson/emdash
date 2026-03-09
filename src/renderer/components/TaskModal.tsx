@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from './ui/button';
+import { Spinner } from './ui/spinner';
 import {
   DialogContent,
   DialogDescription,
@@ -22,6 +23,7 @@ import { type LinearIssueSummary } from '../types/linear';
 import { type GitHubIssueSummary } from '../types/github';
 import { type JiraIssueSummary } from '../types/jira';
 import { type GitLabIssueSummary } from '../types/gitlab';
+import { type PlainThreadSummary } from '../types/plain';
 import {
   generateFriendlyTaskName,
   normalizeTaskName,
@@ -42,6 +44,7 @@ export interface CreateTaskResult {
   linkedLinearIssue?: LinearIssueSummary | null;
   linkedGithubIssue?: GitHubIssueSummary | null;
   linkedJiraIssue?: JiraIssueSummary | null;
+  linkedPlainThread?: PlainThreadSummary | null;
   autoApprove?: boolean;
   useWorktree?: boolean;
   baseRef?: string;
@@ -57,44 +60,49 @@ interface TaskModalProps {
     linkedLinearIssue?: LinearIssueSummary | null,
     linkedGithubIssue?: GitHubIssueSummary | null,
     linkedJiraIssue?: JiraIssueSummary | null,
+    linkedPlainThread?: PlainThreadSummary | null,
     autoApprove?: boolean,
     useWorktree?: boolean,
     baseRef?: string,
     nameGenerated?: boolean
-  ) => void;
+  ) => Promise<void>;
 }
 
 export type TaskModalOverlayProps = BaseModalProps<CreateTaskResult>;
 
-export function TaskModalOverlay({ onSuccess, onClose }: TaskModalOverlayProps) {
+export function TaskModalOverlay({ onClose }: TaskModalOverlayProps) {
+  const { handleCreateTask } = useTaskManagementContext();
+
   return (
     <TaskModal
       onClose={onClose}
-      onCreateTask={(
+      onCreateTask={async (
         name,
         initialPrompt,
         agentRuns,
         linkedLinearIssue,
         linkedGithubIssue,
         linkedJiraIssue,
+        linkedPlainThread,
         autoApprove,
         useWorktree,
         baseRef,
         nameGenerated
-      ) =>
-        onSuccess({
+      ) => {
+        await handleCreateTask(
           name,
           initialPrompt,
           agentRuns,
-          linkedLinearIssue,
-          linkedGithubIssue,
-          linkedJiraIssue,
+          linkedLinearIssue ?? null,
+          linkedGithubIssue ?? null,
+          linkedJiraIssue ?? null,
+          linkedPlainThread ?? null,
           autoApprove,
           useWorktree,
           baseRef,
-          nameGenerated,
-        })
-      }
+          nameGenerated
+        );
+      }}
     />
   );
 }
@@ -118,6 +126,7 @@ const TaskModal: React.FC<TaskModalProps> = ({ onClose, onCreateTask }) => {
   const [error, setError] = useState<string | null>(null);
   const [touched, setTouched] = useState(false);
   const [isFocused, setIsFocused] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
 
   // Advanced settings state
   const [initialPrompt, setInitialPrompt] = useState('');
@@ -125,6 +134,7 @@ const TaskModal: React.FC<TaskModalProps> = ({ onClose, onCreateTask }) => {
   const [selectedGithubIssue, setSelectedGithubIssue] = useState<GitHubIssueSummary | null>(null);
   const [selectedJiraIssue, setSelectedJiraIssue] = useState<JiraIssueSummary | null>(null);
   const [selectedGitlabIssue, setSelectedGitlabIssue] = useState<GitLabIssueSummary | null>(null);
+  const [selectedPlainThread, setSelectedPlainThread] = useState<PlainThreadSummary | null>(null);
   const [autoApprove, setAutoApprove] = useState(false);
   const [useWorktree, setUseWorktree] = useState(true);
 
@@ -188,6 +198,7 @@ const TaskModal: React.FC<TaskModalProps> = ({ onClose, onCreateTask }) => {
       setSelectedGithubIssue(null);
       setSelectedJiraIssue(null);
       setSelectedGitlabIssue(null);
+      setSelectedPlainThread(null);
       setInitialPrompt('');
     }
   }, [hasInitialPromptSupport]);
@@ -211,6 +222,7 @@ const TaskModal: React.FC<TaskModalProps> = ({ onClose, onCreateTask }) => {
     setSelectedGithubIssue(null);
     setSelectedJiraIssue(null);
     setSelectedGitlabIssue(null);
+    setSelectedPlainThread(null);
     setAutoApprove(false);
     setUseWorktree(true);
     userHasTypedRef.current = false;
@@ -241,6 +253,9 @@ const TaskModal: React.FC<TaskModalProps> = ({ onClose, onCreateTask }) => {
       const autoApproveByDefault = settings?.tasks?.autoApproveByDefault ?? false;
       setAutoApprove(autoApproveByDefault && !!agentMeta[agent]?.autoApproveFlag);
 
+      const createWorktreeByDefault = settings?.tasks?.createWorktreeByDefault ?? true;
+      setUseWorktree(createWorktreeByDefault);
+
       // Handle auto-generate setting
       const shouldAutoGenerate = settings?.tasks?.autoGenerateName !== false;
       setAutoGenerateName(shouldAutoGenerate);
@@ -261,7 +276,12 @@ const TaskModal: React.FC<TaskModalProps> = ({ onClose, onCreateTask }) => {
     if (!autoGenerateName || userHasTypedRef.current) return;
 
     // Immediate for issue linking, debounced for typed prompts
-    const hasIssue = !!(selectedLinearIssue || selectedGithubIssue || selectedJiraIssue);
+    const hasIssue = !!(
+      selectedLinearIssue ||
+      selectedGithubIssue ||
+      selectedJiraIssue ||
+      selectedPlainThread
+    );
     const delay = hasIssue ? 0 : 400;
 
     const timer = setTimeout(() => {
@@ -271,6 +291,7 @@ const TaskModal: React.FC<TaskModalProps> = ({ onClose, onCreateTask }) => {
         linearIssue: selectedLinearIssue,
         githubIssue: selectedGithubIssue,
         jiraIssue: selectedJiraIssue,
+        plainThread: selectedPlainThread,
       });
       if (generated) {
         nameFromContextRef.current = true;
@@ -287,6 +308,7 @@ const TaskModal: React.FC<TaskModalProps> = ({ onClose, onCreateTask }) => {
     selectedLinearIssue,
     selectedGithubIssue,
     selectedJiraIssue,
+    selectedPlainThread,
     validate,
   ]);
 
@@ -337,26 +359,26 @@ const TaskModal: React.FC<TaskModalProps> = ({ onClose, onCreateTask }) => {
     // When the name was auto-generated from context (prompt/issue),
     // it's already descriptive — don't mark it for post-creation rename.
 
-    // Close modal immediately - task creation happens in background
-    // The task will appear in sidebar via optimistic UI update
-    onClose();
+    setIsCreating(true);
 
-    // Fire and forget - don't await
     try {
-      onCreateTask(
+      await onCreateTask(
         finalName,
         hasInitialPromptSupport && initialPrompt.trim() ? initialPrompt.trim() : undefined,
         agentRuns,
         selectedLinearIssue,
         selectedGithubIssue,
         selectedJiraIssue,
+        selectedPlainThread,
         hasAutoApproveSupport ? autoApprove : false,
         useWorktree,
         selectedBranch,
         isNameGenerated
       );
+      onClose();
     } catch (error) {
       console.error('Failed to create task:', error);
+      setIsCreating(false);
     }
   };
 
@@ -369,6 +391,12 @@ const TaskModal: React.FC<TaskModalProps> = ({ onClose, onCreateTask }) => {
     <DialogContent
       className="max-h-[calc(100vh-48px)] max-w-md overflow-visible"
       onOpenAutoFocus={handleOpenAutoFocus}
+      onInteractOutside={(e) => {
+        if (isCreating) e.preventDefault();
+      }}
+      onEscapeKeyDown={(e) => {
+        if (isCreating) e.preventDefault();
+      }}
     >
       <DialogHeader>
         <DialogTitle>New Task</DialogTitle>
@@ -455,11 +483,22 @@ const TaskModal: React.FC<TaskModalProps> = ({ onClose, onCreateTask }) => {
           onGitlabIssueChange={setSelectedGitlabIssue}
           isGitlabConnected={integrations.isGitlabConnected}
           onGitlabConnect={integrations.handleGitlabConnect}
+          selectedPlainThread={selectedPlainThread}
+          onPlainThreadChange={setSelectedPlainThread}
+          isPlainConnected={integrations.isPlainConnected}
+          onPlainConnect={integrations.handlePlainConnect}
         />
 
         <DialogFooter>
-          <Button type="submit" disabled={!!error}>
-            Create
+          <Button type="submit" disabled={!!error || isCreating} aria-busy={isCreating}>
+            {isCreating ? (
+              <>
+                <Spinner size="sm" className="mr-2" />
+                Creating…
+              </>
+            ) : (
+              'Create'
+            )}
           </Button>
         </DialogFooter>
       </form>
